@@ -2,6 +2,7 @@ from core import MEALS, totals
 from nutrition import KEYS, recipe_nutrition, nutrition_totals, nutrition_text, ingredient_amount
 from estimation import servings_info
 from tagging import recipe_tags
+from weekly_balance import daily_bounds
 
 
 def products_text(items):
@@ -27,31 +28,48 @@ def products_text(items):
     return '\n'.join(lines)
 
 
-def week_issues(week, portions, targets, tolerance, macro_tolerance):
+def balance_options(context):
+    return {key:context.get(key,default) for key,default in (
+        ('nutrition_mode','daily'),('daily_kcal_spread',.3),('daily_macro_spread',.5),('protein_floor',.75))}
+
+
+def week_issues(week, portions, targets, tolerance, macro_tolerance,nutrition_mode='daily',daily_kcal_spread=.3,daily_macro_spread=.5,protein_floor=.75):
     issues=[]
-    for n,day in enumerate(week,1):
-        values=nutrition_totals([(r,portions) for r in day])
-        if any(v is None for v in values.values()):issues.append(f'День {n}: КБЖУ известно частично.')
-        labels={'kcal':('Калории','ккал'),'protein':('Белки','г'),'fat':('Жиры','г'),'carbs':('Углеводы','г')}
+    labels={'kcal':('Калории','ккал'),'protein':('Белки','г'),'fat':('Жиры','г'),'carbs':('Углеводы','г')}
+    guard=daily_bounds(targets,daily_kcal_spread,daily_macro_spread,protein_floor)
+    daily=[nutrition_totals([(r,portions) for r in day]) for day in week]
+    def check(values,prefix,limits):
         for k in KEYS:
             if values[k] is None:continue
-            bound=tolerance if k=='kcal' else targets[k]*macro_tolerance
-            low=max(0,targets[k]-bound);high=targets[k]+bound
+            low,high=limits[k]
             if values[k]<low-1e-8 or values[k]>high+1e-8:
                 label,unit=labels[k]
                 difference=low-values[k] if values[k]<low else values[k]-high
                 direction='ниже минимума' if values[k]<low else 'выше максимума'
-                issues.append(f'День {n}: {label} — {values[k]:.2f} {unit}; допустимо {low:.2f}–{high:.2f} {unit}; {direction} на {difference:.2f} {unit}.')
+                issues.append(f'{prefix}: {label} — {values[k]:.2f} {unit}; допустимо {low:.2f}–{high:.2f} {unit}; {direction} на {difference:.2f} {unit}.')
+    usual={k:(max(0,targets[k]-(tolerance if k=='kcal' else targets[k]*macro_tolerance)),targets[k]+(tolerance if k=='kcal' else targets[k]*macro_tolerance)) for k in KEYS}
+    for n,values in enumerate(daily,1):
+        if any(v is None for v in values.values()):issues.append(f'День {n}: КБЖУ известно частично.')
+        check(values,f'День {n}',guard if nutrition_mode=='weekly' else usual)
+    if nutrition_mode=='weekly' and daily:
+        average={k:sum(d[k] for d in daily)/len(daily) if all(d[k] is not None for d in daily) else None for k in KEYS}
+        check(average,'Среднее за день недели',usual)
+        if any(v is None for v in average.values()):issues.append('Среднее КБЖУ за неделю известно частично; недельный баланс не подтверждён.')
     return issues
 
 
-def week_report(week, people, portions, targets, tolerance, macro_tolerance, require_nutrition=True,extra_warnings=()):
+def week_report(week, people, portions, targets, tolerance, macro_tolerance, require_nutrition=True,extra_warnings=(),nutrition_mode="daily",daily_kcal_spread=.3,daily_macro_spread=.5,protein_floor=.75):
     lines=['МЕНЮ НА НЕДЕЛЮ',f'Человек: {people}; порций на человека за приём пищи: {portions:g}',
            'Цель на человека в сутки: '+nutrition_text(targets),
            f'Допуски: ±{tolerance:g} ккал; БЖУ ±{macro_tolerance*100:g}%.',
            'Контроль КБЖУ: '+('заданы строгие пределы; фактические отклонения перечислены ниже' if require_nutrition else 'выключен; цели используются только как пожелание'),
            'Разные строки продуктов складываются: граммы + стаканы + ложки; это не варианты замены.\nКБЖУ ниже — на человека, продукты — на всю семью. «≈» — оценка по USDA/справочнику, средним массам и выходу. Неизвестно не означает ноль.\n']
-    issues=week_issues(week,portions,targets,tolerance,macro_tolerance)+list(extra_warnings)
+    options=dict(nutrition_mode=nutrition_mode,daily_kcal_spread=daily_kcal_spread,daily_macro_spread=daily_macro_spread,protein_floor=protein_floor)
+    lines.insert(3,'Режим КБЖУ: '+('недельный баланс — цели и допуски относятся к среднему за день недели' if nutrition_mode=='weekly' else 'строгий дневной — цели и допуски на каждый день'))
+    if nutrition_mode=='weekly':
+        guard=daily_bounds(targets,daily_kcal_spread,daily_macro_spread,protein_floor)
+        lines.insert(4,'Дневные границы на человека: '+ '; '.join(f'{label} {guard[k][0]:.2f}–{guard[k][1]:.2f} {unit}' for k,label,unit in [('kcal','Калории','ккал'),('protein','Белки','г'),('fat','Жиры','г'),('carbs','Углеводы','г')]))
+    issues=week_issues(week,portions,targets,tolerance,macro_tolerance,**options)+list(extra_warnings)
     if issues:lines+=['ВНИМАНИЕ: результат после подбора/ручных правок:',*issues,'']
     all_items=[]
     for day_index,day in enumerate(week,1):

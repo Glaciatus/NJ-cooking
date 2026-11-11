@@ -4,7 +4,7 @@ from collections import Counter
 from nutrition import KEYS
 
 
-def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limits,max_results=24,max_checks=2_000_000):
+def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limits,max_results=24,max_checks=2_000_000,daily_limits=None):
     """Return (days, exhausted, checked). Exact within each anchor up to budget.
 
     Index the last dish by all four nutrients, then intersect via the narrowest
@@ -22,8 +22,9 @@ def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limi
             if strict:
                 windows=[]
                 for key in KEYS:
-                    minimum=(targets[key]-bounds[key])/portions-values[fixed][key]-values[a][key]
-                    maximum=(targets[key]+bounds[key])/portions-values[fixed][key]-values[a][key]
+                    lower,upper=daily_limits[key] if daily_limits else (targets[key]-bounds[key],targets[key]+bounds[key])
+                    minimum=lower/portions-values[fixed][key]-values[a][key]
+                    maximum=upper/portions-values[fixed][key]-values[a][key]
                     ordered=sorted_b[key]
                     lo=bisect_left(ordered,(minimum-1e-8,-1))
                     hi=bisect_right(ordered,(maximum+1e-8,float('inf')))
@@ -37,7 +38,7 @@ def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limi
                 day=[None]*3;day[position]=fixed;day[a_pos]=a;day[b_pos]=b;day=tuple(day)
                 if day in seen:continue
                 seen.add(day)
-                if strict and not all(abs(sum(values[n][k] for n in day)*portions-targets[k])<=bounds[k]+1e-8 for k in KEYS):continue
+                if strict and not all((daily_limits[k][0]-1e-8<=sum(values[n][k] for n in day)*portions<=daily_limits[k][1]+1e-8) if daily_limits else abs(sum(values[n][k] for n in day)*portions-targets[k])<=bounds[k]+1e-8 for k in KEYS):continue
                 counts=Counter(recipes[n].database_id for n in day)
                 if any(counts[db]>quota for db,quota in limits.items()):continue
                 results.append(day)

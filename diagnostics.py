@@ -6,7 +6,7 @@ from pathlib import Path
 import platform
 import sys
 
-APP_VERSION='0.7.1'
+APP_VERSION='0.8.0'
 LOGGER_NAME='nj_cooking'
 
 class MoscowFormatter(logging.Formatter):
@@ -41,7 +41,7 @@ def close_logging(logger):
 
 def log_plan(logger,request_id,context,recipes):
     # Deliberate allowlist. Never serialise recipe bodies, process environment or URLs.
-    fields=('seed','people','portions','kcal','protein','fat','carbs','tolerance','macro_tolerance','require_nutrition',
+    fields=('nutrition_mode','daily_kcal_spread','daily_macro_spread','protein_floor','seed','people','portions','kcal','protein','fat','carbs','tolerance','macro_tolerance','require_nutrition',
             'desired_tags','excluded','wanted','database_limits','enabled_databases','required_ids')
     logger.info('request=%s plan_settings=%s input_recipes=%s',request_id,{k:context[k] for k in fields if k in context},len(recipes))
     from core import recipe_key

@@ -71,6 +71,22 @@ class GuiTests(unittest.TestCase):
         a.after(80,click_accept)
         self.assertTrue(a.confirm_nutrition_preview(week,context,'Не удалось найти строгий вариант'))
 
+    def test_weekly_mode_and_guard_settings_persist_and_validate(self):
+        from storage import save_json
+        a=self.app
+        self.assertEqual(a.read_settings()['nutrition_mode'],'weekly')
+        a.nutrition_mode.set('Строгий дневной')
+        a.settings['daily_kcal_spread'].set('25')
+        a.settings['protein_floor'].set('80')
+        save_json(a.settings_path,a.settings_payload())
+        a.nutrition_mode.set('Недельный баланс');a.settings['protein_floor'].set('75')
+        a.load_settings()
+        self.assertEqual(a.nutrition_mode.get(),'Строгий дневной')
+        self.assertEqual(a.read_settings()['protein_floor'],.8)
+        self.assertEqual(a.read_settings()['daily_kcal_spread'],.25)
+        a.settings['protein_floor'].set('101')
+        with self.assertRaisesRegex(ValueError,'Минимум белка'):a.read_settings()
+
     def test_blank_calories_save_estimate_edit_reload(self):
         a=self.app
         a.fields['name'].set('Каша')

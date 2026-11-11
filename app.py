@@ -21,7 +21,7 @@ from storage import load_library, save_library, save_json
 from menu_editing import arrangement_warnings
 from menu_dialogs import ReplaceDialog,MoveDialog
 from databases import DatabaseManager
-from reports import week_report, day_recipe_text, week_issues
+from reports import week_report, day_recipe_text, week_issues, balance_options
 from examples import example_recipes
 
 DATA = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'NJ-cooking' / 'recipes.json'
@@ -404,7 +404,7 @@ class App(tk.Tk):
         ttk.Label(content, text='Три приёма пищи в день. Все цели КБЖУ — на одного человека в сутки; продукты рассчитываются на всю семью.', wraplength=1000).pack(anchor='w', pady=8)
         self.settings = {key: tk.StringVar(value=value) for key, value in {
             'people': '2', 'portions': '1', 'kcal': '2000', 'protein': '75', 'fat': '67', 'carbs': '275',
-            'tolerance': '200', 'macro_tolerance': '20', 'excluded': '', 'wanted': ''}.items()}
+            'tolerance': '200', 'macro_tolerance': '20', 'daily_kcal_spread':'30', 'daily_macro_spread':'50', 'protein_floor':'75', 'excluded': '', 'wanted': ''}.items()}
         family = ttk.LabelFrame(content, text='Семья', padding=12)
         family.pack(fill='x', pady=8)
         entry_row(family, 'Количество человек', self.settings['people'], 0)
@@ -418,8 +418,17 @@ class App(tk.Tk):
         ttk.Button(box, text='Вернуть стартовые значения', command=self.reset_targets).grid(row=3, column=2, columnspan=2, padx=5)
         ttk.Label(box, text='Если поле пустое, используется: 2000 ккал, Б 75 г, Ж 67 г, У 275 г; допуски ±200 ккал и ±20% БЖУ.\nЭто стартовый ориентир для взрослого, а не индивидуальная норма. Для детей и разных потребностей измените цели.', wraplength=1000).grid(row=4, column=0, columnspan=4, sticky='w', padx=5, pady=8)
         self.require_nutrition=tk.BooleanVar(value=False)
-        ttk.Checkbutton(box,text='Обязательный контроль КБЖУ — исключать неполные данные и соблюдать все пределы',variable=self.require_nutrition).grid(row=5,column=0,columnspan=4,sticky='w',pady=5)
+        ttk.Checkbutton(box,text='Обязательный контроль КБЖУ — полные данные и соблюдение выбранного режима',variable=self.require_nutrition).grid(row=5,column=0,columnspan=4,sticky='w',pady=5)
         ttk.Label(box,text='Без отметки: неизвестное КБЖУ не блокирует подбор, цели — пожелание. Выход блюда должен быть указан или оценён.',wraplength=1000).grid(row=6,column=0,columnspan=4,sticky='w')
+        mode_box=ttk.LabelFrame(content,text='Баланс КБЖУ',padding=12)
+        mode_box.pack(fill='x',pady=8)
+        self.nutrition_mode=tk.StringVar(value='Недельный баланс')
+        ttk.Combobox(mode_box,textvariable=self.nutrition_mode,values=('Недельный баланс','Строгий дневной'),state='readonly',width=28).grid(row=0,column=0,sticky='w')
+        ttk.Label(mode_box,text='Недельный: среднее за 7 дней в пределах цели; каждый день — ближе к ориентиру, без больших перекосов.\nДневной: все четыре показателя в пределах цели ежедневно. При выключенном контроле цели остаются пожеланиями.',wraplength=950).grid(row=1,column=0,columnspan=3,sticky='w',pady=8)
+        entry_row(mode_box,'Дневной разброс калорий ± %',self.settings['daily_kcal_spread'],2,0)
+        entry_row(mode_box,'Дневной разброс БЖУ ± %',self.settings['daily_macro_spread'],2,1)
+        entry_row(mode_box,'Минимум белка за день, % цели',self.settings['protein_floor'],2,2)
+        ttk.Label(mode_box,text='Дневные границы применяются в недельном режиме. Старт: калории ±30%, БЖУ ±50%, белок не ниже 75% цели. Это настраиваемые границы подбора, не медицинские нормы.',wraplength=950).grid(row=4,column=0,columnspan=3,sticky='w',pady=8)
         tag_box=ttk.LabelFrame(content,text='Желаемые блюда — разрешить любой из отмеченных типов',padding=10)
         tag_box.pack(fill='x',pady=8)
         self.desired_tag_vars={tag:tk.BooleanVar(value=False) for tag in TAGS}
@@ -545,7 +554,7 @@ class App(tk.Tk):
         c['required_names']=names
         c['database_names']={d.uid:d.name for d in self.manager.databases}
         extra=arrangement_warnings(week,c,{d.uid for d in self.manager.databases if d.enabled})
-        extra+=week_issues(week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])
+        extra+=week_issues(week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],**balance_options(c))
         return extra
 
     def apply_menu_change(self,new_week,action,select=None):
@@ -1019,7 +1028,7 @@ class App(tk.Tk):
             messagebox.showerror('Не удалось сохранить примеры', str(exc), parent=self)
 
     def reset_targets(self):
-        for key, value in {**DEFAULT_TARGETS, 'tolerance': 200, 'macro_tolerance': 20}.items():
+        for key, value in {**DEFAULT_TARGETS, 'tolerance': 200, 'macro_tolerance': 20, 'daily_kcal_spread':30,'daily_macro_spread':50,'protein_floor':75}.items():
             self.settings[key].set(f'{value:g}')
 
     def load_settings(self):
@@ -1030,6 +1039,7 @@ class App(tk.Tk):
             if not isinstance(data, dict):
                 raise ValueError('неверный формат')
             self.require_nutrition.set(bool(data.get('_require_nutrition',False)))
+            self.nutrition_mode.set('Строгий дневной' if data.get('_nutrition_mode')=='daily' else 'Недельный баланс')
             for tag,var in self.desired_tag_vars.items():var.set(tag in data.get('_desired_tags',[]))
             for key, value in data.items():
                 if key in self.settings and isinstance(value, (str, int, float)):
@@ -1047,10 +1057,16 @@ class App(tk.Tk):
         if result['macro_tolerance'] > 100:
             raise ValueError('Допуск БЖУ: укажите от 0 до 100%.')
         result['macro_tolerance'] /= 100
+        result['nutrition_mode']='weekly' if self.nutrition_mode.get()=='Недельный баланс' else 'daily'
+        for key,label,default in (('daily_kcal_spread','Дневной разброс калорий',30),('daily_macro_spread','Дневной разброс БЖУ',50),('protein_floor','Минимум белка',75)):
+            value=number(self.settings[key].get(),label,default=default)
+            if value>100:raise ValueError(label+': укажите от 0 до 100%.')
+            result[key]=value/100
         return result
 
     def settings_payload(self):
         return {**{k:v.get() for k,v in self.settings.items()},'_require_nutrition':self.require_nutrition.get(),
+                '_nutrition_mode':'weekly' if self.nutrition_mode.get()=='Недельный баланс' else 'daily',
                 '_desired_tags':[t for t,v in self.desired_tag_vars.items() if v.get()]}
 
     def generate(self):
@@ -1071,6 +1087,7 @@ class App(tk.Tk):
 
     def start_plan(self, context, recipes):
         context=copy.deepcopy(context)
+        context.pop('accepted_nutrition_deviations',None)
         recipes=copy.deepcopy(recipes)
         request_id=uuid.uuid4().hex[:10]
         seed=int(request_id,16)
@@ -1082,7 +1099,7 @@ class App(tk.Tk):
                            excluded=context['excluded'],wanted=context['wanted'],seed=seed,
                            macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
                            require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'],
-                           required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
+                           required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}),**balance_options(context))
             try:return plan(recipes,**arguments)
             except NutritionSearchFailure as failure:
                 if not context['require_nutrition']:raise
@@ -1099,7 +1116,7 @@ class App(tk.Tk):
                     return
                 week=proposal['preview_week'];accepted=True
                 context['accepted_nutrition_deviations']=True
-                self.logger.info('request=%s nutrition_preview_accepted issues=%s',request_id,week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance']))
+                self.logger.info('request=%s nutrition_preview_accepted issues=%s',request_id,week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance'],**balance_options(context)))
             self.menu_history=[];self.undo_button.config(state='disabled')
             context.setdefault('required_names',{recipe_key(r):r.name for r in recipes if recipe_key(r) in context.get('required_ids',[])})
             self.last_plan_settings=context
@@ -1120,13 +1137,14 @@ class App(tk.Tk):
         def accept():accepted[0]=True;dialog.destroy()
         ttk.Button(footer,text='Принять меню с этими отклонениями',command=accept).pack(side='left')
         ttk.Button(footer,text='Отмена — сохранить текущее меню',command=dialog.destroy).pack(side='right')
-        ttk.Label(dialog,text='Найден вариант без строгого соблюдения пределов КБЖУ. Проверьте отклонения на человека в сутки.\nИсключения, выход, полнота КБЖУ, обязательные блюда и квоты баз остаются условиями подбора.',wraplength=940,padding=12).pack(fill='x')
+        ttk.Label(dialog,text='Найден вариант с отклонениями от выбранного режима КБЖУ. Проверьте дневные границы и среднее за неделю.\nИсключения, выход, полнота КБЖУ, обязательные блюда и квоты баз остаются условиями подбора.',wraplength=940,padding=12).pack(fill='x')
         text=ScrolledText(dialog,wrap='word',font=(FONT,11));text.pack(fill='both',expand=True,padx=12,pady=8)
-        issues=week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance'])
+        issues=week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance'],**balance_options(context))
         names={d.uid:d.name for d in self.manager.databases}
         quotas='\n'.join(f'{names.get(db,db)}: задано {quota}, получено {sum(r.database_id==db for day in week for r in day)}' for db,quota in context.get('database_limits',{}).items()) or 'Квоты количества блюд по базам не заданы.'
         summary='\n'.join(f'День {n}: '+', '.join(r.name for r in day) for n,day in enumerate(week,1))
-        text.insert('1.0','ОТКЛОНЕНИЯ ОТ ГРАНИЦ (не от центра цели)\n'+'\n'.join(issues)+'\n\nКВОТЫ БАЗ\n'+quotas+'\n\nБЛЮДА\n'+summary+'\n\nПРИЧИНА ОСТАНОВКИ СТРОГОГО ПОДБОРА\n'+reason+'\n\nЭто найденный вариант, а не доказанно ближайшее возможное меню.')
+        mode='Недельный баланс: проверены среднее за неделю и дневные границы.' if context.get('nutrition_mode')=='weekly' else 'Строгий дневной режим.'
+        text.insert('1.0',mode+'\n\nОТКЛОНЕНИЯ ОТ ГРАНИЦ (не от центра цели)\n'+'\n'.join(issues)+'\n\nКВОТЫ БАЗ\n'+quotas+'\n\nБЛЮДА\n'+summary+'\n\nПРИЧИНА ОСТАНОВКИ СТРОГОГО ПОДБОРА\n'+reason+'\n\nЭто найденный вариант, а не доказанно ближайшее возможное меню.')
         text.config(state='disabled')
         self.wait_window(dialog)
         return accepted[0]
@@ -1136,7 +1154,7 @@ class App(tk.Tk):
         save_json(self.menu_path,{'uids':[[recipe_key(r) for r in day] for day in self.week],'context':c})
         context={**c,'database_names':{d.uid:d.name for d in self.manager.databases},'required_names':{**c.get('required_names',{}),**{recipe_key(r):r.name for r in self.recipes}}}
         extra=arrangement_warnings(self.week,context,{d.uid for d in self.manager.databases if d.enabled})
-        self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'],extra_warnings=extra)
+        self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'],extra_warnings=extra,**balance_options(c))
         from collections import Counter
         dbcounts=Counter(r.database_id for day in self.week for r in day)
         sources='; '.join(f'{self.manager.get(uid).name}: {count}' for uid,count in dbcounts.items())
@@ -1148,8 +1166,8 @@ class App(tk.Tk):
             for m,r in enumerate(day):self.week_tree.insert('','end',iid=f'{d}-{m}',text=f'{d+1}. {r.name}',values=(MEALS[m],))
         for button in (self.export_button,self.recalculate_button,self.replan_button):button.config(state='normal')
         from reports import week_issues
-        issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])+extra
-        self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть предупреждения по КБЖУ или условиям меню — подробности в отчёте.' if issues else 'Суточные цели КБЖУ соблюдены.'))
+        issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],**balance_options(c))+extra
+        self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть предупреждения по КБЖУ или условиям меню — подробности в отчёте.' if issues else 'Цели КБЖУ выбранного режима соблюдены.'))
         self.render_day_menu()
 
     def edit_week_recipe(self):
