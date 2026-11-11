@@ -1,0 +1,2 @@
+# Preserve Windows command-file bytes, including in source ZIP archives.
+*.bat -text

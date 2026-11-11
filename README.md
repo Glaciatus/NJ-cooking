@@ -6,7 +6,7 @@
 
 1. Скачайте репозиторий: **Code → Download ZIP**, распакуйте архив.
 2. Установите [Python 3.12 для Windows](https://www.python.org/downloads/windows/) с компонентами **Tcl/Tk** и **Python Launcher** (обычно включены).
-3. Дважды нажмите **start_windows.bat**. Из терминала: `py -3 app.py`.
+3. Дважды нажмите **start_windows.bat** (командный файл использует ASCII и окончания строк Windows CRLF). Из терминала: `py -3 app.py`.
 
 Для запуска из исходников сторонние библиотеки не нужны. Python 3.11+ также подходит.
 

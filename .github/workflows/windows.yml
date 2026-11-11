@@ -15,6 +15,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+      - name: Check Windows launcher
+        shell: cmd
+        run: start_windows.bat --check
       - name: Run unit and Tk interface tests
         run: python -m unittest discover -s tests -v
       - name: Install packaging tools
