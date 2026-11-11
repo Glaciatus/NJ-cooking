@@ -15,6 +15,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
+          cache-dependency-path: requirements-build.txt
       - name: Check Windows launcher
         shell: cmd
         run: start_windows.bat --check
