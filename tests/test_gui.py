@@ -197,3 +197,20 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(all(r.database_id=='personal' for day in a.week for r in day))
         self.assertTrue(any(r.uid==a.recipes[0].uid for day in a.week for r in day))
         self.assertFalse(self.errors)
+
+    def test_failed_plan_writes_diagnostics_and_displays_log_path(self):
+        a=self.app;a.add_examples()
+        a.fields['name'].set('Кукурузная каша')
+        a.fields['kcal'].set('3000')
+        self.assertTrue(a.save_recipe())
+        a.toggle_required(a.current)
+        a.require_nutrition.set(True)
+        a.generate()
+        deadline=time.monotonic()+10
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        self.assertFalse(a.busy)
+        self.assertTrue(self.errors)
+        self.assertIn('Журнал диагностики:',self.errors[-1][1])
+        content=a.log_path.read_text(encoding='utf-8')
+        for text in ('version=0.6.2','plan_settings','database_sources','Кукурузная каша','operation_failed','Traceback','anchored_search'):
+            self.assertIn(text,content)

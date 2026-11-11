@@ -3,6 +3,10 @@ from dataclasses import dataclass, asdict, field
 from collections import defaultdict, Counter
 from itertools import product, chain
 import random
+import logging
+from constrained_search import anchored_days,anchor_diagnostic
+
+log=logging.getLogger("nj_cooking.planner")
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
@@ -148,6 +152,7 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
     Exhaustive day search up to 100k combinations, bounded sample beyond that.
     In strict mode every day respects all nutrient bounds. Every wish is covered.
     """
+    log.info('plan_start recipes=%s required=%s strict=%s',len(recipes),len(required_ids),require_nutrition)
     people = number(people, 'Человек', default=2, integer=True, allow_zero=False)
     portions = number(portions, 'Порции', default=1, allow_zero=False)
     target = number(target, 'Калории', default=DEFAULT_TARGETS['kcal'], allow_zero=False)
@@ -209,12 +214,13 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         if forced>7:raise ValueError(f'Для «{meal}» отмечено {forced} обязательных рецептов, а мест только 7.')
     tokens={('product',term) for term in wanted}|{('recipe',key) for key in required}
     coverage=[frozenset({('product',t) for t in wanted if contains(r,t)}|({('recipe',recipe_key(r))} if recipe_key(r) in required else set())) for r in eligible]
+    log.info('eligible=%s rejected=%s slots=%s quotas=%s',len(eligible),len(rejected)-len(eligible),[len(s) for s in slots],limits)
     values=[recipe_nutrition(r)[0] for r in eligible]
     rng=random.Random(seed)
     count=len(slots[0])*len(slots[1])*len(slots[2])
     exhaustive=count<=100_000
     favourites=[[n for n in slot if recipe_key(eligible[n]) in required] for slot in slots]
-    by_db=[{db:[n for n in slot if eligible[n].database_id==db] for db in active_dbs} for slot in slots]
+    by_db=[{db:[n for n in slot if eligible[n].database_id==db] for db in sorted(active_dbs)} for slot in slots]
     def pick(slot,prefer=False,weighted=False):
         if prefer and favourites[slot] and rng.random()<.75:return rng.choice(favourites[slot])
         if weighted and limits:
@@ -245,6 +251,27 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
             cover=frozenset().union(*(coverage[n] for n in day))
             dbcounts=Counter(eligible[n].database_id for n in day)
             if all(dbcounts[db]<=quota for db,quota in limits.items()):candidates.append((day,cover,error,dbcounts))
+    log.info('random_or_exhaustive_days=%s candidates=%s exhaustive=%s',len(seen),len(candidates),exhaustive)
+    for token in sorted(tokens):
+        if any(token in c[1] for c in candidates):continue
+        anchors=[n for n in range(len(eligible)) if token in coverage[n]]
+        label=keys[token[1]].name if token[0]=='recipe' else token[1]
+        budget=2_000_000;complete=True;added=0
+        for fixed in anchors:
+            days,finished,checks=anchored_days(fixed,slots,values,eligible,targets,bounds,portions,require_nutrition,limits,max_checks=budget)
+            budget-=checks;complete=complete and finished
+            for day in days:
+                daily={k:sum(values[n][k] for n in day)*portions if all(values[n][k] is not None for n in day) else None for k in KEYS}
+                error=sum(abs(daily[k]-targets[k])/max(targets[k],1) if daily[k] is not None else .5 for k in KEYS)
+                cover=frozenset().union(*(coverage[n] for n in day))
+                candidates.append((day,cover,error,Counter(eligible[n].database_id for n in day)));added+=1
+            if added or budget<=0:break
+        log.info('anchored_search wish=%r found=%s work_units=%s complete=%s',label,added,2_000_000-budget,complete)
+        if not added:
+            diagnostic=anchor_diagnostic(anchors[0],slots,values,eligible,targets,bounds,portions,require_nutrition) if anchors else ''
+            outcome='Все дневные сочетания проверены, подходящего нет.' if complete and budget>0 else 'В пределах лимита поиска сочетание не найдено; невозможность не доказана.'
+            hint='Для подбора без жёстких пределов снимите «Обязательный контроль КБЖУ» на шаге 2. Либо измените цели, допуски, квоты или добавьте другие блюда.' if require_nutrition else 'Контроль КБЖУ уже выключен. Проверьте квоты и доступные приёмы пищи в базах.'
+            raise ValueError(f'Не удалось включить «{label}». {outcome}\n'+diagnostic+'\n'+hint)
     if not candidates:
         raise ValueError('Подбор не нашёл сочетания в заданных пределах КБЖУ и квот. Ближайший день: '+nutrition_text(closest or dict.fromkeys(KEYS))+'. Добавьте рецепты или расширьте ограничения.')
     for token in tokens:
@@ -252,7 +279,7 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
             label=keys[token[1]].name if token[0]=='recipe' else token[1]
             raise ValueError('Обязательное пожелание не вписывается в дневные ограничения: '+label)
     pool=candidates if len(candidates)<=2000 else rng.sample(candidates,2000)
-    for token in tokens:
+    for token in sorted(tokens):
         matching=[c for c in candidates if token in c[1]]
         pool.extend(sorted(matching,key=lambda c:(-len(c[1]),c[2]))[:10])
     for _ in range(200 if limits or required else 100):
@@ -274,7 +301,9 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
             _,(day,cover,_,dbcounts)=min(ranked,key=lambda x:x[0])
             week.append(tuple(eligible[n] for n in day));uncovered-=cover;usage.update(day)
             for db in remaining:remaining[db]-=dbcounts[db]
-        if len(week)==7 and not uncovered and all(v==0 for v in remaining.values()):return week
+        if len(week)==7 and not uncovered and all(v==0 for v in remaining.values()):
+            log.info('plan_success days=7 required_covered=%s',len(required))
+            return week
     raise ValueError('Ограниченный подбор не смог совместить обязательные рецепты, квоты баз и остальные условия за 7 дней. Измените отметки, квоты или допуски.')
 
 

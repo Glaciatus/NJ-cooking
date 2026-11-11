@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter.scrolledtext import ScrolledText
 import webbrowser
+import uuid
+from diagnostics import APP_VERSION,configure_logging,close_logging,log_plan
 from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, refresh_week, recipe_key
 from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount
 from estimation import servings_info
@@ -146,10 +148,12 @@ class IngredientDialog(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self, data_path=DATA, include_bundled=None):
         super().__init__()
-        self.title('Семейное меню • рецепты, КБЖУ и покупки')
+        self.title(f'Семейное меню {APP_VERSION} • рецепты, КБЖУ и покупки')
         self.geometry('1240x860')
         self.minsize(1000, 700)
         self.data_path = Path(data_path)
+        self.logger,self.log_path=configure_logging(self.data_path.parent/'logs')
+        self.logger.info('Tk=%s data_directory=%s',tk.TkVersion,self.data_path.parent)
         self.include_bundled = (self.data_path == DATA) if include_bundled is None else include_bundled
         self.settings_path = self.data_path.with_name('settings.json')
         self.menu_path = self.data_path.with_name('menu.json')
@@ -186,7 +190,8 @@ class App(tk.Tk):
         self.option_add('*Font', (FONT, 10))
         header = ttk.Frame(self, padding=(18, 12))
         header.pack(fill='x')
-        ttk.Label(header, text='Семейное меню', style='Title.TLabel').pack(anchor='w')
+        ttk.Button(header,text='Журнал ошибок…',command=self.show_log_location).pack(side='right')
+        ttk.Label(header, text=f'Семейное меню {APP_VERSION}', style='Title.TLabel').pack(anchor='w')
         ttk.Label(header, text='1. Базы и обязательные рецепты → 2. Настройки → 3. Покупки и КБЖУ → 4. Меню по дням', style='Subtitle.TLabel').pack(anchor='w', pady=(4, 0))
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill='both', expand=True, padx=15)
@@ -206,6 +211,7 @@ class App(tk.Tk):
             self.recipes=self.manager.all_recipes()
             self.update_database_choices()
         except (ValueError,OSError,KeyError,TypeError) as exc:
+            self.logger.exception('database_startup_failed')
             messagebox.showerror('Рецепты не загружены — данные сохранены', str(exc), parent=self)
             self.after_idle(self.destroy)
             return
@@ -760,6 +766,7 @@ class App(tk.Tk):
                 self.export_button.config(state='disabled')
             return True
         except (ValueError, OSError) as exc:
+            self.logger.exception('recipe_save_failed name=%r',self.fields['name'].get())
             self.editor_message.config(text=str(exc), foreground='#a4262c')
             self.status.set('Рецепт не сохранён: ' + str(exc))
             return False
@@ -961,6 +968,7 @@ class App(tk.Tk):
             if not context['enabled_databases']:raise ValueError('Включите хотя бы одну базу на шаге 1.')
             save_json(self.settings_path,self.settings_payload())
         except (ValueError,OSError) as exc:
+            self.logger.exception('plan_request_validation_failed')
             self.plan_message.config(text=str(exc),foreground='#a4262c')
             return
         self.start_plan(context,self.manager.active_recipes())
@@ -968,9 +976,13 @@ class App(tk.Tk):
     def start_plan(self, context, recipes):
         context=copy.deepcopy(context)
         recipes=copy.deepcopy(recipes)
+        request_id=uuid.uuid4().hex[:10]
+        seed=int(request_id,16)
+        log_plan(self.logger,request_id,{**context,'seed':seed},recipes)
+        self.logger.info('request=%s database_sources=%s',request_id,[{'id':d.uid,'name':d.name,'enabled':d.enabled,'quota':d.quota,'recipes':len(d.recipes),'required':len(d.required)} for d in self.manager.databases])
         self.plan_message.config(text='Подбираю неделю…',foreground='#334155')
         def work():
-            week=plan(recipes,context['people'],context['portions'],context['kcal'],context['tolerance'],context['excluded'],context['wanted'],
+            week=plan(recipes,context['people'],context['portions'],context['kcal'],context['tolerance'],context['excluded'],context['wanted'],seed=seed,
                       macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
                       require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'],
                       required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
@@ -982,7 +994,7 @@ class App(tk.Tk):
             self.tabs.select(self.menu_tab)
             self.plan_message.config(text='✓ Меню составлено.'+(' Пределы КБЖУ соблюдены.' if context['require_nutrition'] else ' Обязательная проверка КБЖУ выключена.'),foreground='#17623b')
             self.status.set('Меню готово. Для правок откройте блюдо в списке, сохраните изменения и пересчитайте выборку.')
-        self.run_background(work,done,'Составляю меню на неделю…')
+        self.run_background(work,done,'Составляю меню на неделю…',request_id=request_id)
 
     def render_week(self):
         c=self.last_plan_settings
@@ -1059,19 +1071,34 @@ class App(tk.Tk):
             self.last_plan_settings=data['context']
             self.render_week()
         except (ValueError,KeyError,TypeError,OSError) as exc:
+            self.logger.exception('menu_restore_failed')
             self.week=None
             self.status.set('Предыдущее меню не восстановлено: '+str(exc))
 
-    def run_background(self, work, success, text):
+    def show_log_location(self):
+        if self.log_path:
+            messagebox.showinfo('Журнал диагностики',f'Версия {APP_VERSION}\n\nФайл журнала:\n{self.log_path}\n\nПосле ошибки закройте программу и пришлите этот файл. В нём есть настройки подбора и названия обязательных блюд; полные тексты рецептов и переменные окружения не копируются.',parent=self)
+        else:messagebox.showwarning('Журнал недоступен','Не удалось создать журнал. Проверьте права на папку данных.',parent=self)
+
+    def report_callback_exception(self,exc_type,exc_value,traceback):
+        self.logger.error('tk_callback_failed',exc_info=(exc_type,exc_value,traceback))
+        messagebox.showerror('Ошибка интерфейса',str(exc_value)+'\n\nЖурнал: '+str(self.log_path or 'недоступен'),parent=self)
+
+    def run_background(self, work, success, text,request_id=None):
+        request_id=request_id or uuid.uuid4().hex[:10]
+        self.logger.info('request=%s operation_started=%s',request_id,text)
         self.busy = True
         self.generate_button.config(state='disabled')
         self.status.set(text)
         def worker():
             try:
-                self.events.put((success, work(), None))
+                result=work()
+                self.logger.info('request=%s operation_success',request_id)
+                self.events.put((success,result,None))
             except Exception as exc:
+                self.logger.exception('request=%s operation_failed',request_id)
                 self.events.put((success, None, exc))
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker,daemon=True,name='task-'+request_id).start()
 
     def poll_events(self):
         try:
@@ -1082,6 +1109,7 @@ class App(tk.Tk):
                 if error:
                     message=str(error)
                     for db in self.manager.databases:message=message.replace(db.uid,db.name)
+                    message+='\n\nЖурнал диагностики: '+str(self.log_path or 'не удалось создать')
                     self.status.set(message)
                     self.plan_message.config(text=message, foreground='#a4262c')
                     messagebox.showerror('Не удалось завершить операцию',message,parent=self)
@@ -1089,6 +1117,7 @@ class App(tk.Tk):
                     try:
                         success(result)
                     except (OSError, ValueError) as exc:
+                        self.logger.exception('background_result_save_failed')
                         self.status.set(str(exc))
                         messagebox.showerror('Не удалось сохранить результат', str(exc), parent=self)
         except queue.Empty:
@@ -1125,6 +1154,9 @@ class App(tk.Tk):
         if self.search_timer is not None:self.after_cancel(self.search_timer)
         if hasattr(self, 'poll_id'):
             self.after_cancel(self.poll_id)
+        if hasattr(self,'logger'):
+            self.logger.info('application_closed')
+            close_logging(self.logger)
         super().destroy()
 
     def close(self):
@@ -1139,4 +1171,8 @@ if __name__ == '__main__':
         from catalog import records
         assert len(bundled_recipes())==13703 and len(records())>8000
     else:
-        App().mainloop()
+        logger,path=configure_logging(DATA.parent/'logs')
+        try:App().mainloop()
+        except Exception:
+            logger.exception('fatal_startup_or_mainloop_error')
+            raise
