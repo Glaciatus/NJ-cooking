@@ -1,0 +1,2 @@
+# Only needed for packaging; the application itself has no third-party dependencies.
+pyinstaller==6.11.1
