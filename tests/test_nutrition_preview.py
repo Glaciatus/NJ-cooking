@@ -8,12 +8,12 @@ class NutritionPreviewTests(unittest.TestCase):
 
     def test_preview_keeps_complete_nutrition_required_and_exact_database_quota(self):
         lasagna=self.recipe('Лазанья',73)
-        side=self.recipe('Гарнир')
+        side=self.recipe('Гарнир');side2=self.recipe('Второй гарнир')
         unknown=self.recipe('Неизвестное КБЖУ');unknown.fat=None;unknown.ingredients=[Ingredient('Неизвестный ингредиент XYZ',100,'г')]
         args=dict(target=1600,tolerance=200,macro_targets={'protein':75,'fat':30,'carbs':275},
                   required_ids=[recipe_key(lasagna)],database_limits={'personal':21},seed=1)
-        with self.assertRaises(NutritionSearchFailure):plan([lasagna,side,unknown],**args)
-        week=plan([lasagna,side,unknown],**args,allow_nutrition_deviations=True)
+        with self.assertRaises(NutritionSearchFailure):plan([lasagna,side,side2,unknown],**args)
+        week=plan([lasagna,side,side2,unknown],**args,allow_nutrition_deviations=True)
         self.assertEqual(sum(len(d) for d in week),21)
         self.assertTrue(any(lasagna in d for d in week))
         self.assertFalse(any(unknown in d for d in week))

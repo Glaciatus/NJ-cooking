@@ -1,7 +1,7 @@
 """Deterministic anchored search for wishes missed by random day sampling."""
 from bisect import bisect_left,bisect_right
 from collections import Counter
-from nutrition import KEYS
+from nutrition import KEYS,normalize
 
 
 def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limits,max_results=24,max_checks=2_000_000,daily_limits=None):
@@ -11,6 +11,7 @@ def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limi
     permissible window. Never declare impossibility if the budget was exhausted.
     """
     results=[];seen=set();checks=0
+    names=[normalize(r.name) for r in recipes]
     for position,choices in enumerate(slots):
         if fixed not in choices:continue
         a_pos,b_pos=[p for p in range(3) if p!=position]
@@ -36,6 +37,7 @@ def anchored_days(fixed,slots,values,recipes,targets,bounds,portions,strict,limi
                 checks+=1
                 if checks>max_checks:return results,False,checks-1
                 day=[None]*3;day[position]=fixed;day[a_pos]=a;day[b_pos]=b;day=tuple(day)
+                if len({names[n] for n in day})<3:continue
                 if day in seen:continue
                 seen.add(day)
                 if strict and not all((daily_limits[k][0]-1e-8<=sum(values[n][k] for n in day)*portions<=daily_limits[k][1]+1e-8) if daily_limits else abs(sum(values[n][k] for n in day)*portions-targets[k])<=bounds[k]+1e-8 for k in KEYS):continue

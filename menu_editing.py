@@ -1,6 +1,6 @@
 """Non-mutating manual edits to the 7×3 arrangement; nutrition is always derived."""
 from collections import Counter
-from core import MEALS,recipe_key,contains
+from core import MEALS,recipe_key,contains,day_duplicates
 from estimation import servings_info
 from tagging import recipe_tags
 
@@ -41,6 +41,8 @@ def arrangement_warnings(week,context,enabled_databases=None):
     for term in wanted:
         if not any(contains(r,term) for r in items):warnings.append('Не использован желаемый продукт: '+term)
     for day,recipes in enumerate(week):
+        duplicates=day_duplicates(recipes)
+        if duplicates:warnings.append(f'День {day+1}: повтор одного блюда запрещён — '+", ".join(duplicates))
         for meal,r in enumerate(recipes):
             where=f'День {day+1}, {MEALS[meal]}: «{r.name}»'
             if r.meal not in ('Любой',MEALS[meal]):warnings.append(where+' — в карточке указано «'+r.meal+'».')

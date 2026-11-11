@@ -15,7 +15,7 @@ DOCS=Path(__file__).resolve().parents[1]
 html_path=DOCS/'USER_GUIDE_RU.html'
 subprocess.run(['pandoc',str(DOCS/'USER_GUIDE_RU.md'),'--from','gfm','--to','html5','--standalone','--embed-resources',
     '--resource-path='+str(DOCS),'--css',str(DOCS/'guide.css'),'--toc','--toc-depth=2',
-    '--metadata','title=Семейное меню 0.8.0 — инструкция пользователя','--metadata','lang=ru',
+    '--metadata','title=Семейное меню 0.8.1 — инструкция пользователя','--metadata','lang=ru',
     '--output',str(html_path)],check=True)
 html=html_path.read_text()
 # Keep the visible title once and place navigation after the introduction.
@@ -43,7 +43,7 @@ with sync_playwright() as p:
     assert page.locator('img').evaluate_all('(imgs)=>imgs.every(i=>i.complete && i.naturalWidth>0)')
     page.pdf(path=str(DOCS/'USER_GUIDE_RU.pdf'),print_background=True,prefer_css_page_size=True,tagged=True,outline=True,
         display_header_footer=True,header_template='<span></span>',
-        footer_template='<div style="width:100%;font-size:8px;color:#61738a;text-align:center">Семейное меню 0.8.0 · <span class="pageNumber"></span> / <span class="totalPages"></span></div>')
+        footer_template='<div style="width:100%;font-size:8px;color:#61738a;text-align:center">Семейное меню 0.8.1 · <span class="pageNumber"></span> / <span class="totalPages"></span></div>')
     # Check both desktop and narrow reading without network resources.
     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
     page.set_viewport_size({'width':390,'height':844})

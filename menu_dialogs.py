@@ -2,7 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
-from core import recipe_key
+from core import recipe_key,day_duplicates
 from nutrition import recipe_nutrition,nutrition_text,normalize
 from estimation import servings_info
 from tagging import recipe_tags
@@ -73,7 +73,7 @@ class ReplaceDialog(tk.Toplevel):
         issues=self.app.menu_change_warnings(candidate)
         values,estimated=recipe_nutrition(r)
         self.text(r.name+'\n'+('≈ ' if estimated else '')+nutrition_text(values)+' на одну порцию\n'+servings_info(r).explanation+'\nТеги: '+', '.join(recipe_tags(r))+'\n\n'+('Предупреждения после замены:\n'+'\n'.join(issues) if issues else 'Известных нарушений условий нет.'))
-        self.apply_button.config(state='normal')
+        self.apply_button.config(state='disabled' if any(day_duplicates(day) for day in candidate) else 'normal')
     def apply(self):
         r=self.selected()
         if r and self.app.apply_menu_change(replace_dish(self.app.week,self.source,r),'Замена блюда',self.source):self.destroy()
@@ -89,7 +89,8 @@ class MoveDialog(tk.Toplevel):
         self.mode=tk.StringVar(value='swap')
         footer=ttk.Frame(self,padding=10);footer.pack(side='bottom',fill='x')
         ttk.Button(footer,text='Отмена',command=self.destroy).pack(side='right')
-        ttk.Button(footer,text='Применить и пересчитать',command=self.apply).pack(side='right',padx=10)
+        self.apply_button=ttk.Button(footer,text='Применить и пересчитать',command=self.apply)
+        self.apply_button.pack(side='right',padx=10)
         frame=ttk.Frame(self,padding=12);frame.pack(fill='x')
         ttk.Label(frame,text=f'Откуда: день {source[0]+1}, {TIMES[source[1]]} · {app.week[source[0]][source[1]].name}',wraplength=760).pack(anchor='w')
         ttk.Label(frame,text='Куда:').pack(anchor='w',pady=(8,0))
@@ -104,7 +105,9 @@ class MoveDialog(tk.Toplevel):
     def candidate(self):return (swap_dishes if self.mode.get()=='swap' else move_dish)(self.app.week,self.source,self.target())
     def show_preview(self):
         target=self.target();r=self.app.week[target[0]][target[1]]
-        issues=self.app.menu_change_warnings(self.candidate())
+        candidate=self.candidate()
+        issues=self.app.menu_change_warnings(candidate)
+        self.apply_button.config(state='disabled' if any(day_duplicates(day) for day in candidate) else 'normal')
         value=f'В выбранной позиции сейчас: «{r.name}».\nВсе 21 блюдо сохраняются.\n\n'+('Предупреждения после изменения:\n'+'\n'.join(issues) if issues else 'Известных нарушений условий нет.')
         self.preview.config(state='normal');self.preview.delete('1.0','end');self.preview.insert('1.0',value);self.preview.config(state='disabled')
     def apply(self):

@@ -153,6 +153,16 @@ def contains(recipe, term):
     return any(normalize(term) in normalize(i.name) for i in recipe.ingredients)
 
 
+def day_duplicates(day):
+    counts=Counter(normalize(r.name) for r in day)
+    return list(dict.fromkeys(r.name for r in day if counts[normalize(r.name)]>1))
+
+
+def validate_day_variety(week):
+    problems=[f'День {n}: '+', '.join(day_duplicates(day)) for n,day in enumerate(week,1) if day_duplicates(day)]
+    if problems:raise ValueError('Одно блюдо нельзя использовать дважды в один день.\n'+'\n'.join(problems))
+
+
 class NutritionSearchFailure(ValueError):
     """A search failed after hard recipe/quantity checks passed."""
 
@@ -235,10 +245,14 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
     for meal,slot in zip(MEALS,slots):
         forced=sum(keys[k].meal==meal for k in required)
         if forced>7:raise ValueError(f'Для «{meal}» отмечено {forced} обязательных рецептов, а мест только 7.')
+    distinct_slots=[list(dict.fromkeys(normalize(eligible[n].name) for n in slot))[:3] for slot in slots]
+    if not any(len(set(names))==3 for names in product(*distinct_slots)):
+        raise ValueError('Нельзя составить день без повторов: нужны три разных блюда, подходящие для завтрака, обеда и ужина. Добавьте рецепты или расширьте фильтры.')
     tokens={('product',term) for term in wanted}|{('recipe',key) for key in required}
     coverage=[frozenset({('product',t) for t in wanted if contains(r,t)}|({('recipe',recipe_key(r))} if recipe_key(r) in required else set())) for r in eligible]
     log.info('eligible=%s rejected=%s slots=%s quotas=%s',len(eligible),len(rejected)-len(eligible),[len(s) for s in slots],limits)
     values=[recipe_nutrition(r)[0] for r in eligible]
+    dish_names=[normalize(r.name) for r in eligible]
     rng=random.Random(seed)
     count=len(slots[0])*len(slots[1])*len(slots[2])
     exhaustive=count<=100_000
@@ -267,6 +281,7 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
     for day in combinations:
         if day in seen:continue
         seen.add(day)
+        if len({dish_names[n] for n in day})<3:continue
         daily={k:sum(values[n][k] for n in day)*portions if all(values[n][k] is not None for n in day) else None for k in KEYS}
         error=sum((max(0,abs(daily[k]-targets[k])-bounds[k])/max(bounds[k],targets[k]*.01,1) if allow_nutrition_deviations else abs(daily[k]-targets[k])/max(targets[k],1)) if daily[k] is not None else .5 for k in KEYS)
         if error<best_error:closest,best_error=daily,error

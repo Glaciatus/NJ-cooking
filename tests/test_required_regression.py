@@ -14,7 +14,8 @@ class RequiredRegressionTests(unittest.TestCase):
         corn=self.porridge('Кукурузная каша')
         other=Recipe('Другое блюдо',1,650,[Ingredient('Курица',200,'г')],protein=30,fat=22,carbs=75,tags=['Мясное блюдо'])
         self.assertFalse(readiness(apricot,True))
-        week=plan([apricot,corn,other],required_ids=[recipe_key(apricot),recipe_key(corn)],
+        other2=Recipe.from_dict({**other.to_dict(),"uid":"other2","name":"Второе мясное"})
+        week=plan([apricot,corn,other,other2],required_ids=[recipe_key(apricot),recipe_key(corn)],
                   desired_tags=['Мясное блюдо'],require_nutrition=True,seed=7)
         used={recipe_key(r) for day in week for r in day}
         self.assertTrue({recipe_key(apricot),recipe_key(corn)}<=used)

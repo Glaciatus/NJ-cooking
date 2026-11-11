@@ -20,7 +20,7 @@ class NutritionTests(unittest.TestCase):
         self.assertTrue(all(v is None for v in recipe_nutrition(r)[0].values()))
         self.assertTrue(readiness(r))
         with self.assertRaisesRegex(ValueError, 'Нет готовых'):
-            plan([r])
+            plan([r,Recipe.from_dict({**r.to_dict(),"uid":"second","name":"Второй рис"}),Recipe.from_dict({**r.to_dict(),"uid":"third","name":"Третий рис"})])
 
     def test_manual_macros_energy_formula_and_zero(self):
         r = Recipe('Блюдо', 1, None, [Ingredient('Соус', 100, 'г')], protein=10, fat=0, carbs=20)
@@ -68,7 +68,7 @@ class NutritionTests(unittest.TestCase):
 
     def test_custom_goals_and_portion_scaling(self):
         r = Recipe('Блюдо', 4, 500, [Ingredient('Рис', 400, 'г')], protein=20, fat=15, carbs=70)
-        week = plan([r], portions=2, target=3000, tolerance=0,
+        week = plan([r,Recipe.from_dict({**r.to_dict(),"uid":"second","name":"Второе блюдо"}),Recipe.from_dict({**r.to_dict(),"uid":"third","name":"Третье блюдо"})], portions=2, target=3000, tolerance=0,
                     macro_targets={'protein':120, 'fat':90, 'carbs':420}, macro_tolerance=0, seed=2)
         self.assertEqual(nutrition_totals([(r, 2) for r in week[0]])['protein'], 120)
 
@@ -80,4 +80,4 @@ class NutritionTests(unittest.TestCase):
     def test_macro_constraint_does_not_silently_relax(self):
         r = Recipe('Рис', 1, 666, [Ingredient('Рис', 100, 'г')], protein=1, fat=1, carbs=150)
         with self.assertRaisesRegex(ValueError, 'Ближайший'):
-            plan([r])
+            plan([r,Recipe.from_dict({**r.to_dict(),"uid":"second","name":"Второй рис"}),Recipe.from_dict({**r.to_dict(),"uid":"third","name":"Третий рис"})])

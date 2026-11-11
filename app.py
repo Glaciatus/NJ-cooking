@@ -11,8 +11,8 @@ from tkinter.scrolledtext import ScrolledText
 import webbrowser
 import uuid
 from diagnostics import APP_VERSION,configure_logging,close_logging,log_plan
-from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, NutritionSearchFailure, refresh_week, recipe_key
-from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount
+from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, NutritionSearchFailure, refresh_week, validate_day_variety, recipe_key
+from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount, scale_macro_targets
 from estimation import servings_info
 from tagging import TAGS, recipe_tags
 from catalog import search_foods
@@ -412,11 +412,15 @@ class App(tk.Tk):
         box = ttk.LabelFrame(content, text='Желаемое КБЖУ на человека в сутки', padding=12)
         box.pack(fill='x', pady=8)
         for n, (key, label) in enumerate(zip(KEYS, NUTRIENT_LABELS)):
-            entry_row(box, label, self.settings[key], 0, n, width=16)
+            entry=entry_row(box, label, self.settings[key], 0, n, width=16)
+            if key=='kcal':
+                self._macro_calorie_anchor=2000.
+                entry.bind('<FocusOut>',lambda _:self.sync_macro_targets())
+                entry.bind('<Return>',lambda _:self.sync_macro_targets())
         entry_row(box, 'Допуск калорий ± ккал', self.settings['tolerance'], 2, 0)
         entry_row(box, 'Допуск Б, Ж и У ± %', self.settings['macro_tolerance'], 2, 1)
         ttk.Button(box, text='Вернуть стартовые значения', command=self.reset_targets).grid(row=3, column=2, columnspan=2, padx=5)
-        ttk.Label(box, text='Если поле пустое, используется: 2000 ккал, Б 75 г, Ж 67 г, У 275 г; допуски ±200 ккал и ±20% БЖУ.\nЭто стартовый ориентир для взрослого, а не индивидуальная норма. Для детей и разных потребностей измените цели.', wraplength=1000).grid(row=4, column=0, columnspan=4, sticky='w', padx=5, pady=8)
+        ttk.Label(box, text='Если поле пустое, используется: 2000 ккал, Б 75 г, Ж 67 г, У 275 г; допуски ±200 ккал и ±20% БЖУ.\nПри изменении калорий БЖУ пересчитывается при выходе из поля с сохранением текущего соотношения. БЖУ можно уточнить вручную. Это стартовый ориентир для взрослого; для детей и разных потребностей измените цели.', wraplength=1000).grid(row=4, column=0, columnspan=4, sticky='w', padx=5, pady=8)
         self.require_nutrition=tk.BooleanVar(value=False)
         ttk.Checkbutton(box,text='Обязательный контроль КБЖУ — полные данные и соблюдение выбранного режима',variable=self.require_nutrition).grid(row=5,column=0,columnspan=4,sticky='w',pady=5)
         ttk.Label(box,text='Без отметки: неизвестное КБЖУ не блокирует подбор, цели — пожелание. Выход блюда должен быть указан или оценён.',wraplength=1000).grid(row=6,column=0,columnspan=4,sticky='w')
@@ -563,6 +567,7 @@ class App(tk.Tk):
         selected=self.selected_menu_slot() or (0,0)
         try:
             new_week=refresh_week(new_week,self.recipes)
+            validate_day_variety(new_week)
             if [[recipe_key(r) for r in d] for d in new_week]==[[recipe_key(r) for r in d] for d in previous]:
                 self.status.set('Расположение блюд не изменилось.');return True
             self.week=new_week
@@ -1030,6 +1035,17 @@ class App(tk.Tk):
     def reset_targets(self):
         for key, value in {**DEFAULT_TARGETS, 'tolerance': 200, 'macro_tolerance': 20, 'daily_kcal_spread':30,'daily_macro_spread':50,'protein_floor':75}.items():
             self.settings[key].set(f'{value:g}')
+        self._macro_calorie_anchor=2000.
+
+    def sync_macro_targets(self):
+        try:
+            calories=number(self.settings['kcal'].get(),'Калории',default=2000,allow_zero=False)
+            if calories==self._macro_calorie_anchor:return
+            values=scale_macro_targets(calories,{k:self.settings[k].get() for k in KEYS[1:]})
+        except ValueError:return
+        for k,value in values.items():self.settings[k].set(f'{value:g}')
+        self._macro_calorie_anchor=calories
+        self.status.set('Цели БЖУ пересчитаны под калорийность с сохранением соотношения. При необходимости измените граммы вручную.')
 
     def load_settings(self):
         if not self.settings_path.exists():
@@ -1044,10 +1060,12 @@ class App(tk.Tk):
             for key, value in data.items():
                 if key in self.settings and isinstance(value, (str, int, float)):
                     self.settings[key].set(str(value))
+            self._macro_calorie_anchor=number(self.settings['kcal'].get(),'Калории',default=2000,allow_zero=False)
         except (ValueError, OSError) as exc:
             self.status.set(f'Настройки не загружены; используются стартовые значения. {exc}')
 
     def read_settings(self):
+        self.sync_macro_targets()
         result = {key: number(self.settings[key].get(), label, default=DEFAULT_TARGETS[key], allow_zero=False)
                   for key, label in zip(KEYS, NUTRIENT_LABELS)}
         result.update(people=number(self.settings['people'].get(), 'Количество человек', default=2, integer=True, allow_zero=False),

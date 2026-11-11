@@ -111,8 +111,9 @@ class RevisionTests(unittest.TestCase):
         selected=self.recipe('Выбранное');selected.kcal=None;selected.protein=None;selected.fat=None;selected.carbs=None
         selected.ingredients=[Ingredient('Фирменный продукт',100,'г')]
         other=self.recipe('Десерт');other.tags=['Десерт']
-        week=plan([selected,other],require_nutrition=False,desired_tags=['Мясное блюдо'],seed=2)
-        self.assertTrue(all(r.uid==selected.uid for day in week for r in day))
+        allowed=[selected,self.recipe('Второе мясное'),self.recipe('Третье мясное')]
+        week=plan(allowed+[other],require_nutrition=False,desired_tags=['Мясное блюдо'],seed=2)
+        self.assertTrue(all(r.uid in {x.uid for x in allowed} for day in week for r in day))
         with self.assertRaises(ValueError):plan([selected],require_nutrition=True)
         report=week_report(week,2,1,DEFAULT_TARGETS,200,.2,False)
         self.assertIn('известно частично',report)
@@ -121,7 +122,7 @@ class RevisionTests(unittest.TestCase):
 
     def test_recalculation_preserves_all_21_slots_after_rename_and_serving_change(self):
         r=self.recipe()
-        week=plan([r],require_nutrition=False,seed=4)
+        week=[(r,r,r)]*7  # Legacy saved arrangement: refresh preserves positions, rather than generating duplicates.
         edited=copy.deepcopy(r);edited.name='Новое имя';edited.servings=4;edited.kcal=700
         new=refresh_week(week,[edited])
         self.assertTrue(all(x.name=='Новое имя' for day in new for x in day))

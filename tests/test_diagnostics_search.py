@@ -35,10 +35,10 @@ class AnchoredSearchTests(unittest.TestCase):
         normal=food('Обычное',2000/3,25,67/3,275/3,'Любой')
         corn=food('Кукурузная каша',3000,25,20,90,'Любой')
         with self.assertRaisesRegex(ValueError,'Калории, ккал: с этим блюдом возможно') as error:
-            plan([normal,corn],required_ids=[recipe_key(corn)],seed=1)
+            plan([normal,food("Второе обычное",2000/3,25,67/3,275/3,"Любой"),corn],required_ids=[recipe_key(corn)],seed=1)
         self.assertIn('1800.0–2200.0',str(error.exception))
         self.assertIn('Все дневные сочетания проверены',str(error.exception))
-        week=plan([normal,corn],required_ids=[recipe_key(corn)],require_nutrition=False,seed=1)
+        week=plan([normal,food("Второе обычное",2000/3,25,67/3,275/3,"Любой"),corn],required_ids=[recipe_key(corn)],require_nutrition=False,seed=1)
         self.assertTrue(any(r.uid==corn.uid for day in week for r in day))
 
 class DiagnosticTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class DiagnosticTests(unittest.TestCase):
             r.source_url='https://example.com/?secret=NOT_FOR_LOGS'
             log_plan(logger,'request123',{'required_ids':[recipe_key(r)],'kcal':2000,'require_nutrition':True,'not_allowed':'SECRET SENTINEL'},[r])
             normal=food('Обычное',2000/3,25,67/3,275/3,'Любой')
-            try:plan([normal,r],required_ids=[recipe_key(r)])
+            try:plan([normal,food("Второе обычное",2000/3,25,67/3,275/3,"Любой"),r],required_ids=[recipe_key(r)])
             except ValueError:logger.exception('request=request123 operation_failed')
             self.assertEqual(logger.handlers[0].backupCount,3)
             close_logging(logger)

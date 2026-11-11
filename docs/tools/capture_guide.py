@@ -1,4 +1,4 @@
-"""Capture the real Tk 0.8 UI with temporary numbered widgets for the guide.
+"""Capture the real Tk 0.8.1 UI with temporary numbered widgets for the guide.
 
 Documentation tool, Linux/X11 + ImageMagick `import`; no user data is opened.
 Run from repository root: DISPLAY=:99 /usr/bin/python3 docs/tools/capture_guide.py
@@ -116,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='nj-guide-') as directory,patch('app.mes
     match=next((r for r in replace.matches if r.uid!=app.week[0][0].uid),replace.matches[0])
     replace.tree.selection_set(recipe_key(match));replace.show_preview();replace.update()
     capture(replace,'10-replace.png',[variable(replace,replace.database),variable(replace,replace.query),replace.tree,replace.preview,replace.apply_button]);replace.destroy()
-    move=MoveDialog(app,(0,0));move.geometry('+220+150');move.day.set('День 2');move.meal.set('Вечер · ужин');move.update()
+    move=MoveDialog(app,(0,0));move.geometry('+220+150');move.day.set('День 2');move.meal.set('Утро · завтрак');move.update()
     capture(move,'11-move.png',[variable(move,move.day),variable(move,move.meal),button(move,'Обменять местами — изменятся только две позиции'),
         button(move,'Перенести со сдвигом — промежуточные блюда сдвинутся на одну позицию'),button(move,'Применить и пересчитать')]);move.destroy()
     app.tabs.select(app.result_tab);app.update()

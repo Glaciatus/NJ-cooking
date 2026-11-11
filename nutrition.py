@@ -197,3 +197,11 @@ def nutrition_text(values):
 # USDA provenance is retained on each automatically matched food.
 for _alias in aliases():
     FOODS[_alias] = reference_food(_alias)
+
+
+def scale_macro_targets(calories,macros):
+    """Keep protein/fat/carbohydrate energy shares, match the new kcal goal."""
+    calories=number(calories,'Калории',allow_zero=False)
+    values={k:number(macros.get(k),'БЖУ',default=DEFAULT_TARGETS[k],allow_zero=False) for k in KEYS[1:]}
+    energy=4*values['protein']+9*values['fat']+4*values['carbs']
+    return {k:round(values[k]*calories/energy,1) for k in KEYS[1:]}

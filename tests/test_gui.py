@@ -87,6 +87,37 @@ class GuiTests(unittest.TestCase):
         a.settings['protein_floor'].set('101')
         with self.assertRaisesRegex(ValueError,'Минимум белка'):a.read_settings()
 
+    def test_calorie_change_scales_macros_and_preserves_manual_edits_and_loading(self):
+        from storage import save_json
+        a=self.app
+        a.settings['kcal'].set('1600')
+        values=a.read_settings()
+        self.assertAlmostEqual(4*values['protein']+9*values['fat']+4*values['carbs'],1600,delta=1)
+        self.assertLess(values['protein'],75)
+        a.settings['protein'].set('80')
+        self.assertEqual(a.read_settings()['protein'],80)
+        save_json(a.settings_path,a.settings_payload())
+        a.load_settings()
+        self.assertEqual(a.read_settings()['protein'],80)
+        a.settings['kcal'].set('2000');a.sync_macro_targets()
+        self.assertAlmostEqual(float(a.settings['protein'].get())/float(a.settings['fat'].get()),80/values['fat'],delta=.01)
+
+    def test_manual_duplicate_is_blocked_before_saving(self):
+        from menu_editing import replace_dish
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+10
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        old=a.week;before=a.menu_path.read_bytes()
+        from menu_dialogs import ReplaceDialog
+        from core import recipe_key
+        dialog=ReplaceDialog(a,(0,0));dialog.tree.selection_set(recipe_key(old[0][1]));dialog.show_preview()
+        self.assertEqual(str(dialog.apply_button.cget('state')),'disabled')
+        dialog.destroy()
+        self.assertFalse(a.apply_menu_change(replace_dish(old,(0,0),old[0][1]),'Повтор'))
+        self.assertIs(a.week,old)
+        self.assertEqual(a.menu_path.read_bytes(),before)
+        self.assertIn('дважды в один день',self.errors[-1][1])
+
     def test_blank_calories_save_estimate_edit_reload(self):
         a=self.app
         a.fields['name'].set('Каша')
@@ -274,7 +305,7 @@ class GuiTests(unittest.TestCase):
         deadline=time.monotonic()+5
         while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
         before=[[recipe_key(r) for r in day] for day in a.week]
-        replacement=next(r for r in a.recipes if recipe_key(r)!=recipe_key(a.week[0][0]))
+        replacement=next(r for r in a.recipes if r.meal==a.week[0][0].meal and recipe_key(r)!=recipe_key(a.week[0][0]))
         self.assertTrue(a.apply_menu_change(replace_dish(a.week,(0,0),replacement),'Тест замены',(0,0)))
         self.assertEqual(a.week[0][0].uid,replacement.uid)
         saved=json.loads(a.menu_path.read_text(encoding='utf-8'))
@@ -284,12 +315,12 @@ class GuiTests(unittest.TestCase):
         self.assertEqual([[recipe_key(r) for r in day] for day in a.week],before)
         self.assertEqual(str(a.undo_button.cget('state')),'disabled')
         original=a.week[0][0]
-        self.assertTrue(a.apply_menu_change(swap_dishes(a.week,(0,0),(2,2)),'Обмен',(2,2)))
-        self.assertEqual(a.week[2][2].uid,original.uid)
+        self.assertTrue(a.apply_menu_change(swap_dishes(a.week,(0,0),(2,0)),'Обмен',(2,2)))
+        self.assertEqual(a.week[2][0].uid,original.uid)
         self.assertIn('День 3',a.menu_day.get())
         a.undo_menu_change()
-        self.assertTrue(a.apply_menu_change(move_dish(a.week,(0,0),(6,2)),'Перенос',(6,2)))
-        self.assertEqual(a.week[6][2].uid,original.uid)
+        self.assertTrue(a.apply_menu_change(move_dish(a.week,(0,0),(6,0)),'Перенос',(6,2)))
+        self.assertEqual(a.week[6][0].uid,original.uid)
         self.assertFalse(self.errors)
 
     def test_imported_source_nutrition_is_preserved_when_card_is_saved(self):
@@ -324,10 +355,10 @@ class GuiTests(unittest.TestCase):
         while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
         original=a.week[0][0]
         dialog=ReplaceDialog(a,(0,0));a.update()
-        candidate=next(r for r in a.recipes if recipe_key(r)!=recipe_key(original))
+        candidate=next(r for r in a.recipes if r.meal==original.meal and recipe_key(r)!=recipe_key(original))
         dialog.tree.selection_set(recipe_key(candidate));dialog.show_preview();dialog.apply();a.update()
         self.assertEqual(a.week[0][0].uid,candidate.uid)
         dialog=MoveDialog(a,(0,0))
-        dialog.day.set('День 2');dialog.meal.set('Вечер · ужин');dialog.apply();a.update()
-        self.assertEqual(a.week[1][2].uid,candidate.uid)
+        dialog.day.set('День 2');dialog.meal.set('Утро · завтрак');dialog.apply();a.update()
+        self.assertEqual(a.week[1][0].uid,candidate.uid)
         self.assertFalse(self.errors)
