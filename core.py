@@ -88,8 +88,6 @@ def readiness(recipe, require_nutrition=True):
     if not servings_info(recipe).servings:reasons.append('укажите число порций: автоматическая оценка невозможна')
     if not recipe.ingredients:reasons.append('добавьте продукты')
     if require_nutrition:
-        if any(ingredient_amount(i) is None or not i.unit for i in recipe.ingredients):
-            reasons.append('уточните количество и единицы продуктов')
         values,_=recipe_nutrition(recipe)
         missing=[name for key,name in zip(KEYS,('калории','белки','жиры','углеводы')) if values[key] is None]
         if missing:reasons.append('дополните КБЖУ: '+', '.join(missing))
@@ -175,14 +173,20 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
             identifier=matches[0]
         required.add(identifier)
     if len(required)>21:raise ValueError('Отмечено больше 21 обязательного рецепта: в неделе только 21 место.')
-    eligible = [r for r in recipes if not readiness(r,require_nutrition)
-                and limits.get(r.database_id,1)!=0
-                and (not desired_tags or set(desired_tags).intersection(recipe_tags(r)))
-                and not any(contains(r,x) for x in excluded)]
-    available={recipe_key(r) for r in eligible}
-    blocked=required-available
+    def rejection_reasons(recipe):
+        reasons=readiness(recipe,require_nutrition)
+        if limits.get(recipe.database_id,1)==0:reasons.append('для базы задано 0 блюд за неделю')
+        if recipe_key(recipe) not in required and desired_tags and not set(desired_tags).intersection(recipe_tags(recipe)):
+            reasons.append('не совпадает с выбранными типами блюд')
+        forbidden=[term for term in excluded if contains(recipe,term)]
+        if forbidden:reasons.append('содержит исключённые продукты: '+', '.join(forbidden))
+        return reasons
+    rejected={recipe_key(r):rejection_reasons(r) for r in recipes}
+    eligible=[r for r in recipes if not rejected[recipe_key(r)]]
+    blocked=required-{recipe_key(r) for r in eligible}
     if blocked:
-        raise ValueError('Обязательные рецепты не проходят ограничения (теги, исключения, КБЖУ, выход или нулевая квота): '+', '.join(keys[k].name for k in sorted(blocked)))
+        details=['«'+keys[k].name+'»: '+'; '.join(rejected[k])+'.' for k in sorted(blocked)]
+        raise ValueError('Обязательные рецепты нельзя включить:\n'+'\n'.join(details))
     if not eligible:
         raise ValueError('Нет готовых рецептов для меню. Проверьте включённые базы, теги, исключения и выход рецептов. Для неполного КБЖУ отключите обязательную проверку.')
     for term in wanted:

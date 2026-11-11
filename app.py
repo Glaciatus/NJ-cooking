@@ -414,7 +414,7 @@ class App(tk.Tk):
         self.desired_tag_vars={tag:tk.BooleanVar(value=False) for tag in TAGS}
         for n,(tag,var) in enumerate(self.desired_tag_vars.items()):
             ttk.Checkbutton(tag_box,text=tag,variable=var).grid(row=n//4,column=n%4,sticky='w',padx=8)
-        ttk.Label(tag_box,text='Нет отметок — все типы. Отметки ограничивают набор; каждый отмеченный тип не обязательно появится за неделю.',wraplength=1000).grid(row=4,column=0,columnspan=4,sticky='w',pady=5)
+        ttk.Label(tag_box,text='Нет отметок — все типы. Фильтр действует на автоматический подбор; обязательные рецепты включаются независимо от типов.',wraplength=1000).grid(row=4,column=0,columnspan=4,sticky='w',pady=5)
         restrictions = ttk.LabelFrame(content, text='Продукты', padding=12)
         restrictions.pack(fill='x', pady=8)
         restrictions.columnconfigure(0, weight=1)
@@ -704,7 +704,9 @@ class App(tk.Tk):
             reasons = readiness(recipe)
             info=servings_info(recipe)
             unknown = [i.name for i in recipe.ingredients if ingredient_nutrition(i) is None]
+            incomplete=[i.name for i in recipe.ingredients if ingredient_amount(i) is None or not i.unit]
             extra = ('\nНе рассчитаны продукты: ' + ', '.join(unknown[:5]) + '. Откройте продукт или введите КБЖУ блюда вручную.' if unknown and any(v is None for v in values.values()) else '')
+            if incomplete:extra+='\nСписок покупок неполный — уточните количество/единицы: '+', '.join(incomplete[:5])+'. Это не блокирует ручное КБЖУ.'
             self.nutrition_preview.config(text=info.explanation + '\n' + ('≈ Оценка: ' if estimated else 'На порцию: ') + nutrition_text(values) +
                                           ('\nДля строгого контроля КБЖУ: ' + '; '.join(reasons) + '.' if reasons else '\n✓ Рецепт подходит для строгого контроля КБЖУ.') + extra)
         except ValueError as exc:
