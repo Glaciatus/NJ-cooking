@@ -16,6 +16,15 @@
 
 ### Windows .exe
 
+Готовая программа публикуется в [Releases](https://github.com/Glaciatus/NJ-cooking/releases) **после успешного прохождения Windows-сборки и проверок**:
+
+- [Скачать NJ-Cooking.exe](https://github.com/Glaciatus/NJ-cooking/releases/latest/download/NJ-Cooking.exe) — Python на ПК не требуется.
+- [Скачать ZIP с exe](https://github.com/Glaciatus/NJ-cooking/releases/latest/download/NJ-Cooking-Windows.zip).
+- [Контрольные суммы SHA-256](https://github.com/Glaciatus/NJ-cooking/releases/latest/download/SHA256SUMS.txt).
+
+Пока первая публикация не завершилась, эти прямые ссылки могут возвращать 404. Скачивание из Releases не требует входа в GitHub для публичного репозитория. Если страница Actions/Artifacts выдаёт «This page is taking too long to load», используйте Releases. Первая распаковка встроенных ресурсов при запуске exe может занять время.
+
+
 [Actions → Windows application](https://github.com/Glaciatus/NJ-cooking/actions/workflows/windows.yml) тестирует приложение, собирает `.exe` с папкой данных и проверяет встроенные ресурсы через `--self-test`. **После успешного запуска** скачайте `NJ-Cooking-Windows` из Artifacts и распакуйте. Наличие workflow не означает, что конкретная сборка уже завершилась успешно.
 
 Сборка на Windows вручную:

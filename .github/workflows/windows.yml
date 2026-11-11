@@ -4,14 +4,17 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -30,8 +33,53 @@ jobs:
         run: |
           $process = Start-Process -FilePath .\dist\NJ-Cooking.exe -ArgumentList '--self-test' -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Packaged data check failed: $($process.ExitCode)" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: NJ-Cooking-Windows
           path: dist/NJ-Cooking.exe
           if-no-files-found: error
+
+  publish:
+    name: Publish Windows download
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: NJ-Cooking-Windows
+          path: release-files
+      - name: Package download and checksums
+        working-directory: release-files
+        run: |
+          test -s NJ-Cooking.exe
+          zip NJ-Cooking-Windows.zip NJ-Cooking.exe
+          sha256sum NJ-Cooking.exe NJ-Cooking-Windows.zip > SHA256SUMS.txt
+      - name: Publish tested application to Releases
+        working-directory: release-files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          release_tag="windows-build-${GITHUB_RUN_NUMBER}"
+          cat > release-notes.md <<'NOTES'
+          Готовая программа для Windows. Python устанавливать не нужно.
+
+          Скачайте NJ-Cooking.exe либо NJ-Cooking-Windows.zip и распакуйте архив.
+          Встроенные рецепты и USDA включены в exe. Пользовательские данные хранятся отдельно.
+
+          Сборка прошла тесты и проверку встроенных данных. SHA256SUMS.txt содержит контрольные суммы.
+          NOTES
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release upload "$release_tag" NJ-Cooking.exe NJ-Cooking-Windows.zip SHA256SUMS.txt --clobber
+            gh release edit "$release_tag" --latest
+          else
+            gh release create "$release_tag" NJ-Cooking.exe NJ-Cooking-Windows.zip SHA256SUMS.txt \
+              --target "$GITHUB_SHA" --title "Windows — сборка ${GITHUB_RUN_NUMBER}" \
+              --notes-file release-notes.md --latest
+          fi
+          echo "## Скачать готовую программу" >> "$GITHUB_STEP_SUMMARY"
+          echo "[NJ-Cooking.exe](https://github.com/${GH_REPO}/releases/latest/download/NJ-Cooking.exe)" >> "$GITHUB_STEP_SUMMARY"
+          echo "[ZIP](https://github.com/${GH_REPO}/releases/latest/download/NJ-Cooking-Windows.zip)" >> "$GITHUB_STEP_SUMMARY"
