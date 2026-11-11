@@ -43,7 +43,7 @@ def week_report(week, people, portions, targets, tolerance, macro_tolerance, req
            'Цель на человека в сутки: '+nutrition_text(targets),
            f'Допуски: ±{tolerance:g} ккал; БЖУ ±{macro_tolerance*100:g}%.',
            'Контроль КБЖУ: '+('обязательный' if require_nutrition else 'выключен; цели используются только как пожелание'),
-           'КБЖУ ниже — на человека, продукты — на всю семью. «≈» — оценка по USDA/справочнику, средним массам и выходу. Неизвестно не означает ноль.\n']
+           'Разные строки продуктов складываются: граммы + стаканы + ложки; это не варианты замены.\nКБЖУ ниже — на человека, продукты — на всю семью. «≈» — оценка по USDA/справочнику, средним массам и выходу. Неизвестно не означает ноль.\n']
     issues=week_issues(week,portions,targets,tolerance,macro_tolerance)
     if issues:lines+=['ВНИМАНИЕ: результат после подбора/ручных правок:',*issues,'']
     all_items=[]
@@ -60,12 +60,10 @@ def week_report(week, people, portions, targets, tolerance, macro_tolerance, req
             if recipe.source_url:lines.append('Источник (фото/видео): '+recipe.source_url)
             lines.append('')
         lines+=['КБЖУ за день на человека: '+nutrition_text(nutrition_totals([(r,portions) for r in day])),
-                'КБЖУ за день на семью: '+nutrition_text(nutrition_totals([(r,people*portions) for r in day])),
                 'ПРОДУКТЫ ЗА ДЕНЬ:',products_text([(r,people*portions) for r in day]),'']
         all_items.extend((r,people*portions) for r in day)
     family=nutrition_totals(all_items)
-    lines+=['ИТОГО ЗА НЕДЕЛЮ','КБЖУ на семью: '+nutrition_text(family),
-            'КБЖУ на человека: '+nutrition_text({k:v/people if v is not None else None for k,v in family.items()}),
+    lines+=['ИТОГО ЗА НЕДЕЛЮ','КБЖУ на человека: '+nutrition_text({k:v/people if v is not None else None for k,v in family.items()}),
             'Среднее за день на человека: '+nutrition_text({k:v/people/7 if v is not None else None for k,v in family.items()}),
             '\nСПИСОК ПОКУПОК НА НЕДЕЛЮ',products_text(all_items)]
     if any(v is None for v in family.values()):
@@ -74,5 +72,18 @@ def week_report(week, people, portions, targets, tolerance, macro_tolerance, req
             values,_=recipe_nutrition(recipe)
             for k,v in values.items():
                 if v is not None:known[k]+=v*count
-        lines+=['\nКБЖУ только известной части недели на семью (НЕ полный итог): '+nutrition_text(known)]
+        lines+=['\nКБЖУ только известной части недели на человека (НЕ полный итог): '+nutrition_text({k:v/people for k,v in known.items()})]
+    return '\n'.join(lines)
+
+
+def day_recipe_text(recipe,people,portions):
+    values,estimated=recipe_nutrition(recipe)
+    per_person={k:v*portions if v is not None else None for k,v in values.items()}
+    info=servings_info(recipe)
+    lines=[recipe.name,'Теги: '+', '.join(recipe_tags(recipe)),
+           'КБЖУ на человека за этот приём пищи: '+('≈ ' if estimated else '')+nutrition_text(per_person),
+           f'Готовим {people*portions:g} порций на {people} человек.',info.explanation,
+           '\nПРОДУКТЫ НА ВСЮ СЕМЬЮ:',products_text([(recipe,people*portions)]),
+           '\nПРИГОТОВЛЕНИЕ:',recipe.method or 'Способ приготовления пока не заполнен.']
+    if recipe.source_url:lines+=['\nИСТОЧНИК · фото и видео:',recipe.source_url]
     return '\n'.join(lines)

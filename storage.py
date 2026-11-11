@@ -28,7 +28,7 @@ def load_recipes(path):
     if not path.exists():
         return []
     try:
-        content = json.loads(path.read_text(encoding='utf-8'))
+        content = json.loads(path.read_text(encoding='utf-8-sig'))
         if not isinstance(content, list):
             raise ValueError('ожидался список рецептов')
         return [Recipe.from_dict(item) for item in content]
@@ -61,7 +61,7 @@ def load_library(path, include_bundled=True):
     user=[]
     if path.exists():
         try:
-            content=json.loads(path.read_text(encoding='utf-8'))
+            content=json.loads(path.read_text(encoding='utf-8-sig'))
             if isinstance(content,list):user=[Recipe.from_dict(r) for r in content]
             elif isinstance(content,dict) and content.get('format')==2:
                 legacy_format=False

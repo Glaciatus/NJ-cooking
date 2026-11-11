@@ -9,14 +9,15 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter.scrolledtext import ScrolledText
 import webbrowser
-from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, refresh_week
+from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, refresh_week, recipe_key
 from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount
 from estimation import servings_info
 from tagging import TAGS, recipe_tags
 from catalog import search_foods
 from importing import import_url, public_url, parse_ingredient, import_docx
 from storage import load_library, save_library, save_json
-from reports import week_report
+from databases import DatabaseManager
+from reports import week_report, day_recipe_text
 from examples import example_recipes
 
 DATA = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'NJ-cooking' / 'recipes.json'
@@ -155,6 +156,11 @@ class App(tk.Tk):
         self.last_plan_settings = None
         self.editor_uid = None
         self.search_timer = None
+        self.manager=None
+        self.browse_database="personal"
+        self.library_page=0
+        self.editor_database_id="personal"
+        self.editor_expanded=False
         self.recipes = []
         self.current = None
         self.ingredients_data = []
@@ -181,20 +187,25 @@ class App(tk.Tk):
         header = ttk.Frame(self, padding=(18, 12))
         header.pack(fill='x')
         ttk.Label(header, text='Семейное меню', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(header, text='1. Добавьте и проверьте рецепты → 2. Выберите цели → 3. Получите меню и список покупок', style='Subtitle.TLabel').pack(anchor='w', pady=(4, 0))
+        ttk.Label(header, text='1. Базы и обязательные рецепты → 2. Настройки → 3. Покупки и КБЖУ → 4. Меню по дням', style='Subtitle.TLabel').pack(anchor='w', pady=(4, 0))
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill='both', expand=True, padx=15)
-        self.library_tab, self.settings_tab, self.result_tab = [ttk.Frame(self.tabs, padding=12) for _ in range(3)]
-        for frame, title in zip((self.library_tab, self.settings_tab, self.result_tab), ('1. Мои рецепты', '2. Семья и цели КБЖУ', '3. Меню и покупки')):
+        self.library_tab, self.settings_tab, self.result_tab, self.menu_tab = [ttk.Frame(self.tabs, padding=12) for _ in range(4)]
+        for frame, title in zip((self.library_tab, self.settings_tab, self.result_tab, self.menu_tab), ('1. Базы и рецепты', '2. Семья и цели КБЖУ', '3. Итоги и покупки', '4. Меню')):
             self.tabs.add(frame, text=title)
         self.status = tk.StringVar(value='Начните с кнопки «Новый рецепт», «Из ссылки» или «Примеры».')
         ttk.Label(self, textvariable=self.status, padding=(18, 10), wraplength=1100).pack(fill='x')
         self.build_library()
         self.build_settings()
         self.build_result()
+        self.build_day_menu()
+        self.status.set('Подключаю базы и переношу прежние данные…')
+        self.update_idletasks()
         try:
-            self.recipes = load_library(self.data_path,self.include_bundled)
-        except ValueError as exc:
+            self.manager=DatabaseManager(self.data_path,self.include_bundled)
+            self.recipes=self.manager.all_recipes()
+            self.update_database_choices()
+        except (ValueError,OSError,KeyError,TypeError) as exc:
             messagebox.showerror('Рецепты не загружены — данные сохранены', str(exc), parent=self)
             self.after_idle(self.destroy)
             return
@@ -202,15 +213,39 @@ class App(tk.Tk):
         self.refresh_library()
         self.load_editor(None)
         self.load_saved_week()
-        if self.include_bundled:self.status.set(f"База подключена: {len(self.recipes)} рецептов. Подтверждение каждого не требуется. Перейдите к шагу 2.")
+        if self.include_bundled:self.status.set(f"Подключено баз: {len(self.manager.databases)} · Рецептов: {len(self.recipes)}. Для подбора используются только включённые БД.")
         self.poll_id = self.after(80, self.poll_events)
         self.protocol('WM_DELETE_WINDOW', self.close)
 
     def build_library(self):
+        dbbar=ttk.Frame(self.library_tab)
+        dbbar.pack(fill='x',pady=(0,8))
+        ttk.Label(dbbar,text='Открытая база:').pack(side='left')
+        self.database_choice=tk.StringVar()
+        self.database_combo=ttk.Combobox(dbbar,textvariable=self.database_choice,state='readonly',width=24)
+        self.database_combo.pack(side='left',padx=6)
+        self.database_combo.bind('<<ComboboxSelected>>',self.change_database)
+        self.database_enabled=tk.BooleanVar(value=True)
+        ttk.Checkbutton(dbbar,text='Использовать эту БД для меню',variable=self.database_enabled,command=self.save_database_options).pack(side='left',padx=6)
+        ttk.Button(dbbar,text='Подключить JSON…',command=self.connect_database).pack(side='left',padx=4)
+        ttk.Button(dbbar,text='Создать БД…',command=self.create_database).pack(side='left')
+        limits=ttk.Frame(self.library_tab)
+        limits.pack(fill='x',pady=(0,8))
+        ttk.Label(limits,text='Блюд из этой БД за неделю (0–21, пусто — свободно):').pack(side='left')
+        self.database_quota=tk.StringVar()
+        quota=ttk.Entry(limits,textvariable=self.database_quota,width=5)
+        quota.pack(side='left',padx=6)
+        quota.bind('<FocusOut>',lambda _:self.save_database_options())
+        quota.bind('<Return>',lambda _:self.save_database_options())
+        self.database_summary=ttk.Label(limits,wraplength=650)
+        self.database_summary.pack(side='left',padx=8)
         split = ttk.Panedwindow(self.library_tab, orient='horizontal')
         split.pack(fill='both', expand=True)
         left = ttk.Frame(split, width=330)
         right = ttk.Frame(split)
+        self.library_split=split
+        self.library_left=left
+        self.library_right=right
         split.add(left, weight=1)
         split.add(right, weight=3)
         toolbar = ttk.Frame(left)
@@ -222,27 +257,43 @@ class App(tk.Tk):
         ttk.Label(left, text='Найти рецепт').pack(anchor='w')
         ttk.Entry(left, textvariable=self.search).pack(fill='x', pady=5)
         self.search.trace_add('write', lambda *_: self.schedule_search())
-        self.library = ttk.Treeview(left, columns=('state',), show='tree headings', selectmode='browse', height=14)
+        self.only_required=tk.BooleanVar(value=False)
+        ttk.Checkbutton(left,text='Только обязательные рецепты',variable=self.only_required,command=self.reset_library_page).pack(anchor='w')
+        footer=ttk.Frame(left)
+        footer.pack(side='bottom',fill='x')
+        tree_area=ttk.Frame(left)
+        tree_area.pack(fill='both',expand=True)
+        self.library = ttk.Treeview(tree_area, columns=('required','state'), show='tree headings', selectmode='browse', height=14)
         self.library.heading('#0', text='Название')
+        self.library.heading('required',text='В меню')
+        self.library.column('required',width=65,stretch=False)
         self.library.heading('state', text='Статус')
         self.library.column('#0', width=190)
         self.library.column('state', width=110)
-        scroll = ttk.Scrollbar(left, orient='vertical', command=self.library.yview)
+        scroll = ttk.Scrollbar(tree_area, orient='vertical', command=self.library.yview)
         self.library.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
         self.library.pack(fill='both', expand=True)
         self.library.bind('<<TreeviewSelect>>', self.select_recipe)
-        self.library_count = ttk.Label(left, wraplength=310)
+        self.library.bind('<Button-1>',self.click_required)
+        self.library.bind('<space>',self.space_required)
+        pages=ttk.Frame(footer);pages.pack(fill='x',pady=4)
+        ttk.Button(pages,text='← Назад',command=lambda:self.page_library(-1)).pack(side='left')
+        ttk.Button(pages,text='Далее →',command=lambda:self.page_library(1)).pack(side='left',padx=4)
+        ttk.Button(pages,text='Сбросить поиск',command=self.reset_search).pack(side='left')
+        ttk.Button(footer,text='Сбросить избранное этой БД…',command=self.reset_required).pack(fill='x',pady=4)
+        self.library_count = ttk.Label(footer, wraplength=310)
         self.library_count.pack(anchor='w', pady=8)
-        actions = ttk.Frame(left)
+        actions = ttk.Frame(footer)
         actions.pack(fill='x')
         ttk.Button(actions, text='Примеры', command=self.add_examples).pack(side='left')
         ttk.Button(actions, text='Удалить', command=self.delete_recipe).pack(side='left', padx=4)
-        ttk.Button(left, text='Далее: семья и цели →', command=lambda: self.tabs.select(self.settings_tab)).pack(fill='x', pady=10)
+        ttk.Button(footer, text='Далее: семья и цели →', command=lambda: self.tabs.select(self.settings_tab)).pack(fill='x', pady=10)
         fixed_actions = ttk.Frame(right, padding=(15, 0, 8, 8))
         fixed_actions.pack(fill='x')
         ttk.Button(fixed_actions, text='Сохранить изменения рецепта', style='Primary.TButton', command=self.save_recipe).pack(side='left')
-        ttk.Label(fixed_actions, text='Ctrl+S', foreground='#666666').pack(side='left', padx=8)
+        self.expand_button=ttk.Button(fixed_actions,text='Развернуть карточку',command=self.toggle_editor)
+        self.expand_button.pack(side='left',padx=6)
         self.bind('<Control-s>', lambda _: self.save_recipe() if self.tabs.select() == str(self.library_tab) else None)
         # Scrollable editor keeps the form accessible on smaller Windows screens.
         canvas = tk.Canvas(right, highlightthickness=0)
@@ -264,7 +315,7 @@ class App(tk.Tk):
         self.bind_all('<MouseWheel>', wheel, add='+')
         self.editor_title = ttk.Label(form, text='Новый рецепт', font=(FONT, 14, 'bold'))
         self.editor_title.pack(anchor='w')
-        ttk.Label(form, text='Можно сохранить неполный рецепт. Для меню потребуются порции, количества продуктов и полное КБЖУ.', wraplength=650).pack(anchor='w', pady=5)
+        ttk.Label(form, text='Неполный рецепт можно сохранить. Для меню нужен известный или оценённый выход. Полное КБЖУ требуется только при включённой проверке.', wraplength=650).pack(anchor='w', pady=5)
         self.fields = {key: tk.StringVar() for key in ('name', 'servings', 'kcal', 'protein', 'fat', 'carbs', 'source_url', 'meal')}
         basic = ttk.Frame(form)
         basic.pack(fill='x')
@@ -401,25 +452,194 @@ class App(tk.Tk):
         self.output.pack(fill='both',expand=True,pady=(6,0))
         self.set_output('Встроенные рецепты уже доступны на шаге 1. Настройте семью, теги и контроль КБЖУ на шаге 2 и составьте меню.')
 
+    def build_day_menu(self):
+        bar=ttk.Frame(self.menu_tab);bar.pack(fill='x',pady=(0,8))
+        ttk.Label(bar,text='Выберите день:').pack(side='left')
+        self.menu_day=tk.StringVar(value='День 1')
+        ttk.Combobox(bar,textvariable=self.menu_day,values=[f'День {n}' for n in range(1,8)],state='readonly',width=15).pack(side='left',padx=10)
+        self.menu_day.trace_add('write',lambda *_:self.render_day_menu())
+        ttk.Button(bar,text='Редактировать рецепт на весь экран',command=self.edit_day_recipe).pack(side='left',padx=6)
+        ttk.Button(bar,text='Пересчитать после правок',command=self.recalculate_week).pack(side='left')
+        ttk.Label(self.menu_tab,textvariable=self.week_message,wraplength=1100).pack(anchor='w',pady=5)
+        self.day_summary=ttk.Label(self.menu_tab,font=(FONT,11,'bold'),wraplength=1100)
+        self.day_summary.pack(anchor='w',pady=5)
+        self.day_recipes=ttk.Treeview(self.menu_tab,columns=('meal',),show='tree headings',height=3,selectmode='browse')
+        self.day_recipes.heading('#0',text='Рецепты выбранного дня — выберите для просмотра')
+        self.day_recipes.heading('meal',text='Приём пищи')
+        self.day_recipes.column('#0',width=800);self.day_recipes.column('meal',width=150)
+        self.day_recipes.pack(fill='x',pady=6)
+        self.day_recipes.bind('<<TreeviewSelect>>',lambda _:self.show_day_recipe())
+        self.day_reader=ScrolledText(self.menu_tab,wrap='word',font=(FONT,11),state='disabled',padx=15,pady=12)
+        self.day_reader.pack(fill='both',expand=True)
+        self.set_reader_text(self.day_reader,'Составьте неделю на шаге 2. Здесь появятся рецепты по дням с большим окном приготовления.')
+
+    def day_index(self):
+        try:return max(0,min(6,int(self.menu_day.get().split()[-1])-1))
+        except (ValueError,IndexError):return 0
+
+    def render_day_menu(self):
+        if not hasattr(self,'day_recipes'):return
+        selected=self.day_recipes.selection()
+        previous=selected[0] if selected else '0'
+        self.day_recipes.delete(*self.day_recipes.get_children())
+        if not self.week:
+            self.day_summary.config(text='Меню ещё не составлено.');return
+        d=self.day_index()
+        from nutrition import nutrition_totals
+        c=self.last_plan_settings
+        self.day_summary.config(text=f'День {d+1} · КБЖУ на человека: '+nutrition_text(nutrition_totals([(r,c['portions']) for r in self.week[d]])))
+        for m,r in enumerate(self.week[d]):self.day_recipes.insert('','end',iid=str(m),text=r.name,values=(MEALS[m],))
+        self.day_recipes.selection_set(previous if self.day_recipes.exists(previous) else '0')
+        self.show_day_recipe()
+
+    def show_day_recipe(self):
+        selected=self.day_recipes.selection()
+        if not self.week or not selected:return
+        recipe=self.week[self.day_index()][int(selected[0])]
+        c=self.last_plan_settings
+        name=self.manager.get(recipe.database_id).name
+        self.set_reader_text(self.day_reader,'База: '+name+'\n\n'+day_recipe_text(recipe,c['people'],c['portions']))
+
+    def edit_day_recipe(self):
+        if not self.week or not self.day_recipes.selection():
+            self.status.set('Сначала составьте меню и выберите рецепт дня.');return
+        if not self.confirm_switch():return
+        self.open_recipe_editor(self.week[self.day_index()][int(self.day_recipes.selection()[0])])
+
+    def update_database_choices(self):
+        self.database_labels={f'{n}. {d.name}':d.uid for n,d in enumerate(self.manager.databases,1)}
+        self.database_combo.config(values=list(self.database_labels))
+        if self.browse_database not in self.database_labels.values():self.browse_database=self.manager.databases[0].uid
+        self.database_choice.set(next(label for label,uid in self.database_labels.items() if uid==self.browse_database))
+        d=self.manager.get(self.browse_database)
+        self.database_enabled.set(d.enabled)
+        self.database_quota.set('' if d.quota is None else str(d.quota))
+        self.update_database_summary()
+
+    def update_database_summary(self):
+        if not self.manager:return
+        active=[d.name for d in self.manager.databases if d.enabled]
+        count=sum(len(d.required) for d in self.manager.databases if d.enabled)
+        self.database_summary.config(text='Включены: '+(', '.join(active) or 'ни одной')+f' · Обязательных: {count}')
+
+    def save_database_options(self):
+        if not self.manager:return True
+        try:
+            quota=number(self.database_quota.get(),'Блюд из базы',integer=True)
+            if quota is not None and quota>21:raise ValueError('Из одной базы можно выбрать от 0 до 21 блюд за неделю.')
+            d=self.manager.get(self.browse_database)
+            old=(d.enabled,d.quota)
+            d.enabled,d.quota=self.database_enabled.get(),quota
+            try:self.manager.persist()
+            except OSError:
+                d.enabled,d.quota=old
+                raise
+            self.update_database_summary()
+            return True
+        except (ValueError,OSError) as exc:
+            self.status.set(str(exc))
+            return False
+
+    def change_database(self,_=None):
+        selected=self.database_labels.get(self.database_choice.get())
+        if not selected or selected==self.browse_database:return
+        if not self.confirm_switch() or not self.save_database_options():
+            self.update_database_choices();return
+        self.browse_database=selected;self.current=None;self.library_page=0
+        self.search.set('');self.update_database_choices();self.load_editor(None);self.refresh_library()
+
+    def select_database(self,uid):
+        self.browse_database=uid;self.library_page=0;self.update_database_choices()
+
+    def connect_database(self):
+        if not self.confirm_switch():return
+        path=filedialog.askopenfilename(parent=self,title='Подключить базу NJ-Cooking (JSON-массив рецептов)',filetypes=[('База рецептов NJ-Cooking','*.json')])
+        if not path:return
+        try:
+            d=self.manager.connect(path)
+            self.recipes=self.manager.all_recipes();self.current=None
+            self.select_database(d.uid);self.load_editor(None);self.refresh_library()
+            self.status.set(f'Подключена база «{d.name}». Файл: {d.path}')
+        except (ValueError,OSError,KeyError,TypeError) as exc:messagebox.showerror('База не подключена',str(exc),parent=self)
+
+    def create_database(self):
+        if not self.confirm_switch():return
+        path=filedialog.asksaveasfilename(parent=self,title='Создать отдельную базу',defaultextension='.json',filetypes=[('База рецептов','*.json')])
+        if not path:return
+        try:
+            d=self.manager.create(path)
+            self.recipes=self.manager.all_recipes();self.current=None
+            self.select_database(d.uid);self.load_editor(None);self.refresh_library()
+        except (ValueError,OSError) as exc:messagebox.showerror('База не создана',str(exc),parent=self)
+
+    def click_required(self,event):
+        row=self.library.identify_row(event.y)
+        if row and self.library.identify_column(event.x)=='#1':
+            self.toggle_required(int(row));return 'break'
+
+    def space_required(self,_=None):
+        rows=self.library.selection()
+        if rows:self.toggle_required(int(rows[0]))
+        return 'break'
+
+    def toggle_required(self,index):
+        try:
+            recipe=self.recipes[index]
+            enabled=self.manager.toggle_required(recipe)
+            self.refresh_library();self.update_database_summary()
+            self.status.set(('Обязательно включить: ' if enabled else 'Отметка снята: ')+recipe.name)
+        except OSError as exc:self.status.set('Не удалось сохранить отметку: '+str(exc))
+
+    def reset_required(self):
+        d=self.manager.get(self.browse_database)
+        if not d.required:
+            self.status.set('В этой базе нет отмеченных рецептов.');return
+        if messagebox.askyesno('Сброс избранных рецептов',f'Снять все {len(d.required)} отметок «обязательно в меню» в базе «{d.name}»?\nРецепты не удалятся, но перестанут быть обязательными. Отметки других баз сохранятся.',parent=self):
+            old=set(d.required);d.required.clear()
+            try:self.manager.persist()
+            except OSError as exc:d.required=old;self.status.set(str(exc));return
+            self.refresh_library();self.update_database_summary()
+
+    def toggle_editor(self):
+        if self.editor_expanded:
+            self.library_split.insert(0,self.library_left,weight=1)
+            self.expand_button.config(text='Развернуть карточку')
+        else:
+            self.library_split.forget(self.library_left)
+            self.expand_button.config(text='Показать список рецептов')
+        self.editor_expanded=not self.editor_expanded
+
+    def reset_search(self):
+        self.search.set('');self.only_required.set(False);self.reset_library_page()
+
+    def reset_library_page(self):
+        self.library_page=0;self.refresh_library()
+
+    def page_library(self,delta):
+        self.library_page=max(0,self.library_page+delta);self.refresh_library()
+
     def schedule_search(self):
+        self.library_page=0
         if self.search_timer is not None:self.after_cancel(self.search_timer)
         self.search_timer=self.after(200,self.refresh_library)
 
     def refresh_library(self):
         if self.search_timer is not None:self.after_cancel(self.search_timer)
         self.search_timer=None
+        if not self.manager:return
         self.selection_lock=True
         self.library.delete(*self.library.get_children())
-        term=normalize(self.search.get())
-        matches=[n for n,r in enumerate(self.recipes) if term in normalize(r.name)]
-        visible=matches[:300]
+        term=normalize(self.search.get());d=self.manager.get(self.browse_database)
+        matches=[n for n,r in enumerate(self.recipes) if r.database_id==d.uid and term in normalize(r.name) and (not self.only_required.get() or r.uid in d.required)]
+        self.library_page=min(self.library_page,max(0,(len(matches)-1)//300))
+        visible=matches[self.library_page*300:(self.library_page+1)*300]
         if self.current is not None and self.current in matches and self.current not in visible:visible.append(self.current)
         for n in visible:
             r=self.recipes[n]
             state='Нет выхода' if readiness(r,False) else 'Неполное КБЖУ' if readiness(r) else 'КБЖУ есть'
-            self.library.insert('','end',iid=str(n),text=r.name,values=(state,))
+            self.library.insert('','end',iid=str(n),text=r.name,values=('☑' if r.uid in d.required else '☐',state))
         if self.current is not None and self.library.exists(str(self.current)):self.library.selection_set(str(self.current))
-        self.library_count.config(text=f'Всего: {len(self.recipes)} · Найдено: {len(matches)} · Показано: {len(visible)}.\nДля поиска остальных введите часть названия. Подтверждение рецептов не требуется.')
+        self.library_count.config(text=f'В базе: {len(d.recipes)} · Найдено: {len(matches)} · Страница {self.library_page+1}.\nОтметка «В меню» — обязательное включение хотя бы раз за неделю. Отмечено: {len(d.required)}.')
         self.selection_lock=False
 
     def auto_tags(self):
@@ -446,6 +666,7 @@ class App(tk.Tk):
         self.current = index
         recipe = self.recipes[index] if index is not None else Recipe('', None, None, [])
         self.editor_uid=recipe.uid
+        self.editor_database_id=recipe.database_id or ('personal' if self.manager.get(self.browse_database).bundled else self.browse_database)
         self.source_category=recipe.source_category
         for tag,var in self.recipe_tag_vars.items():var.set(tag in recipe_tags(recipe))
         for key, var in self.fields.items():
@@ -469,7 +690,7 @@ class App(tk.Tk):
                         **{key: number(self.fields[key].get(), label) for key, label in zip(KEYS[1:], NUTRIENT_LABELS[1:])},
                         source_url=self.fields['source_url'].get().strip(), meal=self.fields['meal'].get() or 'Любой', import_notes=self.loaded_notes,
                         uid=self.editor_uid or Recipe('',None,None,[]).uid,source_category=getattr(self,'source_category',''),
-                        tags=[tag for tag,var in self.recipe_tag_vars.items() if var.get()])
+                        tags=[tag for tag,var in self.recipe_tag_vars.items() if var.get()],database_id=self.editor_database_id)
         if recipe.source_url:
             public_url(recipe.source_url)
         return recipe
@@ -491,7 +712,9 @@ class App(tk.Tk):
 
     def new_recipe(self):
         if self.confirm_switch():
+            if self.manager.get(self.browse_database).bundled:self.select_database('personal')
             self.load_editor(None)
+            self.refresh_library()
             self.library.selection_remove(*self.library.selection())
 
     def select_recipe(self, _=None):
@@ -512,7 +735,7 @@ class App(tk.Tk):
         try:
             recipe = self.read_editor()
             validate_recipe(recipe)
-            if any(n != self.current and normalize(r.name) == normalize(recipe.name) for n, r in enumerate(self.recipes)):
+            if any(n != self.current and r.database_id==recipe.database_id and normalize(r.name)==normalize(recipe.name) for n,r in enumerate(self.recipes)):
                 raise ValueError('Такое название уже есть. Измените его или откройте существующий рецепт для редактирования.')
             updated = list(self.recipes)
             index = self.current
@@ -521,15 +744,16 @@ class App(tk.Tk):
                 updated.append(recipe)
             else:
                 updated[index] = recipe
-            save_library(self.data_path,updated,self.include_bundled)
+            self.manager.save_all(updated)
             self.recipes = updated
+            if recipe.database_id!=self.browse_database:self.select_database(recipe.database_id)
             self.load_editor(index)
             self.refresh_library()
             reasons = readiness(recipe)
             text = ('Черновик сохранён. Для меню: '+ '; '.join(readiness(recipe,False))+'.' if readiness(recipe,False) else '✓ Сохранено. Можно использовать без обязательного контроля КБЖУ.' if reasons else '✓ Сохранено. Рецепт подходит для строгого контроля КБЖУ.')
             self.editor_message.config(text=text, foreground='#665000' if reasons else '#17623b')
             self.status.set(text)
-            if self.week and any(r.uid==recipe.uid for day in self.week for r in day):
+            if self.week and any(recipe_key(r)==recipe_key(recipe) for day in self.week for r in day):
                 self.week_message.set('Рецепт изменён. Нажмите «Пересчитать эти блюда» для обновления КБЖУ и покупок или повторите подбор из текущей выборки.')
                 self.export_button.config(state='disabled')
             return True
@@ -543,15 +767,15 @@ class App(tk.Tk):
             self.status.set('Сначала выберите рецепт в списке слева.')
             return
         if messagebox.askyesno('Удалить рецепт?', f'Удалить «{self.recipes[self.current].name}»? Предыдущая версия библиотеки останется в .bak.', parent=self):
-            deleted_uid=self.recipes[self.current].uid
+            deleted_uid=recipe_key(self.recipes[self.current])
             updated = [r for n, r in enumerate(self.recipes) if n != self.current]
             try:
-                save_library(self.data_path,updated,self.include_bundled)
+                self.manager.save_all(updated)
             except OSError as exc:
                 messagebox.showerror('Не удалось сохранить', str(exc), parent=self)
                 return
             self.recipes = updated
-            if self.week and any(r.uid==deleted_uid for day in self.week for r in day):
+            if self.week and any(recipe_key(r)==deleted_uid for day in self.week for r in day):
                 self.week_message.set('Рецепт из текущего меню удалён. Составьте новую неделю из библиотеки.')
                 self.export_button.config(state='disabled')
             self.load_editor(None)
@@ -617,17 +841,20 @@ class App(tk.Tk):
         if not self.confirm_switch():
             self.status.set('Импорт отменён: текущий рецепт остался открыт.')
             return
+        target='personal' if self.manager.get(self.browse_database).bundled else self.browse_database
         updated = list(self.recipes)
         for recipe in recipes:
+            recipe.database_id=target
             original = recipe.name
             counter = 2
-            while any(normalize(r.name) == normalize(recipe.name) for r in updated):
+            while any(r.database_id==target and normalize(r.name)==normalize(recipe.name) for r in updated):
                 recipe.name = f'{original} ({counter})'
                 counter += 1
             updated.append(recipe)
-        save_library(self.data_path,updated,self.include_bundled)
+        self.manager.save_all(updated)
         first = len(self.recipes)
         self.recipes = updated
+        self.select_database(target)
         self.load_editor(first)
         self.refresh_library()
         self.tabs.select(self.library_tab)
@@ -675,7 +902,8 @@ class App(tk.Tk):
             messagebox.showerror('Формат документа не поддерживается', f'Выберите исправный .docx. {exc}', parent=self)
 
     def add_examples(self):
-        recipes = [r for r in example_recipes() if not any(normalize(r.name) == normalize(old.name) for old in self.recipes)]
+        target='personal' if self.manager.get(self.browse_database).bundled else self.browse_database
+        recipes = [r for r in example_recipes() if not any(old.database_id==target and normalize(r.name)==normalize(old.name) for old in self.recipes)]
         if not recipes:
             self.status.set('Все примеры уже добавлены. Перейдите к шагу 2.')
             return
@@ -721,17 +949,19 @@ class App(tk.Tk):
                 '_desired_tags':[t for t,v in self.desired_tag_vars.items() if v.get()]}
 
     def generate(self):
-        if self.busy or not self.confirm_switch():return
+        if self.busy or not self.confirm_switch() or not self.save_database_options():return
         try:
             context=self.read_settings()
             context.update(require_nutrition=self.require_nutrition.get(),
                            desired_tags=[t for t,v in self.desired_tag_vars.items() if v.get()],
                            excluded=self.settings['excluded'].get().split(','),wanted=self.settings['wanted'].get().split(','))
+            context.update(required_ids=self.manager.required_keys(),database_limits=self.manager.limits(),enabled_databases=[d.uid for d in self.manager.databases if d.enabled])
+            if not context['enabled_databases']:raise ValueError('Включите хотя бы одну базу на шаге 1.')
             save_json(self.settings_path,self.settings_payload())
         except (ValueError,OSError) as exc:
             self.plan_message.config(text=str(exc),foreground='#a4262c')
             return
-        self.start_plan(context,self.recipes)
+        self.start_plan(context,self.manager.active_recipes())
 
     def start_plan(self, context, recipes):
         context=copy.deepcopy(context)
@@ -740,13 +970,14 @@ class App(tk.Tk):
         def work():
             week=plan(recipes,context['people'],context['portions'],context['kcal'],context['tolerance'],context['excluded'],context['wanted'],
                       macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
-                      require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'])
+                      require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'],
+                      required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
             return week
         def done(week):
             self.last_plan_settings=context
             self.week=week
             self.render_week()
-            self.tabs.select(self.result_tab)
+            self.tabs.select(self.menu_tab)
             self.plan_message.config(text='✓ Меню составлено.'+(' Пределы КБЖУ соблюдены.' if context['require_nutrition'] else ' Обязательная проверка КБЖУ выключена.'),foreground='#17623b')
             self.status.set('Меню готово. Для правок откройте блюдо в списке, сохраните изменения и пересчитайте выборку.')
         self.run_background(work,done,'Составляю меню на неделю…')
@@ -754,6 +985,11 @@ class App(tk.Tk):
     def render_week(self):
         c=self.last_plan_settings
         self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'])
+        from collections import Counter
+        dbcounts=Counter(r.database_id for day in self.week for r in day)
+        sources='; '.join(f'{self.manager.get(uid).name}: {count}' for uid,count in dbcounts.items())
+        required=set(c.get('required_ids',[]));present={recipe_key(r) for day in self.week for r in day}
+        self.report='Блюд из баз: '+sources+'\n'+f'Обязательных рецептов включено: {len(required&present)} из {len(required)}.\n\n'+self.report
         self.set_output(self.report)
         self.week_tree.delete(*self.week_tree.get_children())
         for d,day in enumerate(self.week):
@@ -762,7 +998,8 @@ class App(tk.Tk):
         from reports import week_issues
         issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])
         self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть неизвестное КБЖУ или отклонения от целей — подробности в отчёте.' if issues else 'Суточные цели КБЖУ соблюдены.'))
-        save_json(self.menu_path,{'uids':[[r.uid for r in day] for day in self.week],'context':c})
+        self.render_day_menu()
+        save_json(self.menu_path,{'uids':[[recipe_key(r) for r in day] for day in self.week],'context':c})
 
     def edit_week_recipe(self):
         selection=self.week_tree.selection()
@@ -771,37 +1008,50 @@ class App(tk.Tk):
             return
         if not self.confirm_switch():return
         d,m=map(int,selection[0].split('-'))
-        uid=self.week[d][m].uid
-        index=next((n for n,r in enumerate(self.recipes) if r.uid==uid),None)
+        self.open_recipe_editor(self.week[d][m])
+
+    def open_recipe_editor(self,recipe):
+        key=recipe_key(recipe)
+        index=next((n for n,r in enumerate(self.recipes) if recipe_key(r)==key),None)
         if index is None:
             self.status.set('Этот рецепт удалён. Составьте меню заново.')
             return
+        self.select_database(self.recipes[index].database_id)
         self.search.set('')
+        self.only_required.set(False)
         self.load_editor(index)
         self.refresh_library()
         self.tabs.select(self.library_tab)
+        if not self.editor_expanded:self.toggle_editor()
 
     def recalculate_week(self):
         if self.busy or not self.week or not self.confirm_switch():return
         try:
+            origin=self.tabs.select()
             self.week=refresh_week(self.week,self.recipes)
             self.render_week()
-            self.tabs.select(self.result_tab)
+            self.tabs.select(self.menu_tab if origin==str(self.menu_tab) else self.result_tab)
         except (ValueError,OSError) as exc:self.status.set(str(exc))
 
     def replan_current(self):
         if self.busy or not self.week or not self.confirm_switch():return
         try:
             week=refresh_week(self.week,self.recipes)
-            recipes=list({r.uid:r for day in week for r in day}.values())
-            self.start_plan(self.last_plan_settings,recipes)
+            if not self.save_database_options():return
+            enabled={d.uid for d in self.manager.databases if d.enabled}
+            recipes=list({recipe_key(r):r for day in week for r in day if r.database_id in enabled}.values())
+            context={**self.last_plan_settings,'required_ids':self.manager.required_keys(),'database_limits':self.manager.limits(),'enabled_databases':sorted(enabled)}
+            self.start_plan(context,recipes)
         except ValueError as exc:self.status.set(str(exc))
 
     def load_saved_week(self):
         if not self.menu_path.exists():return
         try:
             data=json.loads(self.menu_path.read_text(encoding='utf-8'))
-            lookup={r.uid:r for r in self.recipes}
+            lookup={recipe_key(r):r for r in self.recipes}
+            from collections import Counter
+            counts=Counter(r.uid for r in self.recipes)
+            lookup.update({r.uid:r for r in self.recipes if counts[r.uid]==1})
             if len(data['uids'])!=7 or any(len(day)!=3 for day in data['uids']):raise ValueError('неверная структура недели')
             self.week=[tuple(lookup[uid] for uid in day) for day in data['uids']]
             self.last_plan_settings=data['context']
@@ -828,9 +1078,11 @@ class App(tk.Tk):
                 self.busy = False
                 self.generate_button.config(state='normal')
                 if error:
-                    self.status.set(str(error))
-                    self.plan_message.config(text=str(error), foreground='#a4262c')
-                    messagebox.showerror('Не удалось завершить операцию', str(error), parent=self)
+                    message=str(error)
+                    for db in self.manager.databases:message=message.replace(db.uid,db.name)
+                    self.status.set(message)
+                    self.plan_message.config(text=message, foreground='#a4262c')
+                    messagebox.showerror('Не удалось завершить операцию',message,parent=self)
                 else:
                     try:
                         success(result)
@@ -841,17 +1093,20 @@ class App(tk.Tk):
             pass
         self.poll_id = self.after(80, self.poll_events)
 
-    def set_output(self, text):
+    def set_output(self,text):
+        self.set_reader_text(self.output,text)
+
+    def set_reader_text(self,widget,text):
         import re
-        self.output.config(state='normal')
-        self.output.delete('1.0', 'end')
-        self.output.insert('1.0', text)
+        widget.config(state='normal')
+        widget.delete('1.0', 'end')
+        widget.insert('1.0', text)
         for n, match in enumerate(re.finditer(r'https?://[^\s]+', text)):
             tag = f'url_{n}'
-            self.output.tag_add(tag, f'1.0+{match.start()}c', f'1.0+{match.end()}c')
-            self.output.tag_config(tag, foreground='#1769aa', underline=True)
-            self.output.tag_bind(tag, '<Button-1>', lambda _, url=match.group(): webbrowser.open(public_url(url)))
-        self.output.config(state='disabled')
+            widget.tag_add(tag, f'1.0+{match.start()}c', f'1.0+{match.end()}c')
+            widget.tag_config(tag, foreground='#1769aa', underline=True)
+            widget.tag_bind(tag, '<Button-1>', lambda _, url=match.group(): webbrowser.open(public_url(url)))
+        widget.config(state='disabled')
 
     def export(self):
         if not self.report:

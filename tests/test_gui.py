@@ -156,3 +156,44 @@ class GuiTests(unittest.TestCase):
         dialog.save()
         self.assertEqual(dialog.result.fdc_id,171287)
         self.assertIsNone(dialog.result.amount_estimate)
+
+    def test_day_menu_has_full_recipe_and_day_navigation(self):
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        self.assertEqual(len(a.tabs.tabs()),4)
+        self.assertEqual(len(a.day_recipes.get_children()),3)
+        a.menu_day.set('День 2');a.update()
+        self.assertIn(a.week[1][0].name,a.day_reader.get('1.0','end'))
+        self.assertIn('ПРИГОТОВЛЕНИЕ',a.day_reader.get('1.0','end'))
+        self.assertIn('КБЖУ на человека',a.day_summary.cget('text'))
+        self.assertNotIn('КБЖУ за день на семью',a.report)
+        a.edit_day_recipe();a.update()
+        self.assertTrue(a.editor_expanded)
+        a.toggle_editor();self.assertFalse(a.editor_expanded)
+
+    def test_required_checkboxes_persist_and_reset_needs_confirmation(self):
+        a=self.app;a.add_examples()
+        a.update()
+        box=a.library.bbox('0','required')
+        self.assertTrue(box)
+        a.library.event_generate('<Button-1>',x=box[0]+10,y=box[1]+10)
+        a.update()
+        self.assertEqual(len(a.manager.required_keys()),1)
+        with patch('app.messagebox.askyesno',return_value=False) as confirm:
+            a.reset_required()
+            self.assertEqual(len(a.manager.required_keys()),1)
+            confirm.assert_called_once()
+        with patch('app.messagebox.askyesno',return_value=True):a.reset_required()
+        self.assertFalse(a.manager.required_keys())
+
+    def test_personal_only_generation_and_required_recipe(self):
+        a=self.app;a.add_examples()
+        a.toggle_required(0)
+        a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        self.assertFalse(a.busy)
+        self.assertTrue(all(r.database_id=='personal' for day in a.week for r in day))
+        self.assertTrue(any(r.uid==a.recipes[0].uid for day in a.week for r in day))
+        self.assertFalse(self.errors)
