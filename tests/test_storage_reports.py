@@ -20,7 +20,7 @@ class StorageReportTests(unittest.TestCase):
             recipes[0].source_url = 'https://example.com/recipe'
             save_recipes(path, recipes)
             self.assertEqual(load_recipes(path)[0].source_url, 'https://example.com/recipe')
-            self.assertEqual(json.loads(path.with_suffix('.json.bak').read_text()), old)
+            self.assertEqual(json.loads(path.with_suffix('.json.bak').read_text(encoding='utf-8')), old)
 
     def test_draft_round_trip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -37,7 +37,7 @@ class StorageReportTests(unittest.TestCase):
             path.write_text('broken', encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'не перезаписаны'):
                 load_recipes(path)
-            self.assertEqual(path.read_text(), 'broken')
+            self.assertEqual(path.read_text(encoding='utf-8'), 'broken')
 
     def test_report_has_macros_source_and_week_family_totals(self):
         recipes=example_recipes()

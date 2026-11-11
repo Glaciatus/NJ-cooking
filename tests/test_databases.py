@@ -63,7 +63,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(custom.read_bytes(),original)
             manager.connect(custom)
             with self.assertRaises(ValueError):manager.connect(custom)
-            invalid=Path(directory)/'invalid.json';invalid.write_text('{"FoundationFoods": []}')
+            invalid=Path(directory)/'invalid.json';invalid.write_text('{"FoundationFoods": []}',encoding='utf-8')
             with self.assertRaises(ValueError):manager.connect(invalid)
             reserved=Path(directory)/'menu.json'
             with self.assertRaises(ValueError):manager.create(reserved)

@@ -277,7 +277,7 @@ class GuiTests(unittest.TestCase):
         replacement=next(r for r in a.recipes if recipe_key(r)!=recipe_key(a.week[0][0]))
         self.assertTrue(a.apply_menu_change(replace_dish(a.week,(0,0),replacement),'Тест замены',(0,0)))
         self.assertEqual(a.week[0][0].uid,replacement.uid)
-        saved=json.loads(a.menu_path.read_text())
+        saved=json.loads(a.menu_path.read_text(encoding='utf-8'))
         self.assertEqual(saved['uids'][0][0],recipe_key(replacement))
         self.assertIn(replacement.name,a.report)
         a.undo_menu_change()

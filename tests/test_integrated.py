@@ -37,7 +37,7 @@ class DataTests(unittest.TestCase):
             built=library[0];uid=built.uid;built.name='Моя правка встроенного рецепта';built.servings=7
             library.pop(1)
             save_library(path,library)
-            payload=json.loads(path.read_text())
+            payload=json.loads(path.read_text(encoding='utf-8'))
             self.assertEqual(payload['format'],2)
             self.assertEqual(len(payload['overrides']),2)
             self.assertEqual(len(payload['hidden_ids']),1)
@@ -45,7 +45,7 @@ class DataTests(unittest.TestCase):
             self.assertEqual(len(restored),13703)
             self.assertEqual(next(r for r in restored if r.uid==uid).servings,7)
             self.assertTrue(any(r.uid==local.uid for r in restored))
-            self.assertEqual(len(json.loads(path.with_suffix('.json.bak').read_text())),1)
+            self.assertEqual(len(json.loads(path.with_suffix('.json.bak').read_text(encoding='utf-8'))),1)
             self.assertNotEqual(bundled_recipes()[0].name,'Моя правка встроенного рецепта')
 
     def test_legacy_recipe_matches_bundle_by_source_without_duplicate(self):
