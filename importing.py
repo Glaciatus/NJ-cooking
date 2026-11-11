@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from core import Recipe, Ingredient, validate_recipe
+from diagnostics import APP_VERSION
 
 MAX_PAGE = 4_000_000
 
@@ -46,10 +47,21 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def decode_html(raw,header_encoding=None):
+    if raw.startswith(b'\xef\xbb\xbf'):return raw.decode('utf-8-sig')
+    declared=re.search(rb'charset\s*=\s*["\']?([a-zA-Z0-9_-]+)',raw[:8192],re.I)
+    choices=[header_encoding,declared[1].decode('ascii') if declared else None,'utf-8','windows-1251']
+    for encoding in choices:
+        if not encoding:continue
+        try:return raw.decode(encoding)
+        except (UnicodeDecodeError,LookupError):pass
+    return raw.decode('utf-8',errors='replace')
+
+
 def fetch_page(url):
     url = public_url(url)
     request = urllib.request.Request(url, headers={
-        'User-Agent': 'NJ-Cooking/0.2 (personal recipe importer)',
+        'User-Agent': f'NJ-Cooking/{APP_VERSION} (personal recipe importer)',
         'Accept': 'text/html,application/xhtml+xml', 'Accept-Encoding': 'identity'})
     try:
         with urllib.request.build_opener(SafeRedirect()).open(request, timeout=15) as response:
@@ -59,11 +71,7 @@ def fetch_page(url):
             content = response.read(MAX_PAGE + 1)
             if len(content) > MAX_PAGE:
                 raise ImportFailure('Страница слишком большая (более 4 МБ).')
-            encoding = response.headers.get_content_charset() or 'utf-8'
-            try:
-                text = content.decode(encoding, errors='replace')
-            except LookupError:
-                text = content.decode('utf-8', errors='replace')
+            text=decode_html(content,response.headers.get_content_charset())
             return text, final_url
     except urllib.error.HTTPError as e:
         raise ImportFailure(f'Сайт вернул HTTP {e.code}. Возможно, он запрещает автоматический импорт. Ссылку можно сохранить вручную.') from None
@@ -136,7 +144,9 @@ def quantity(text):
 UNIT_ALIASES = {
     'г': 'г', 'гр': 'г', 'грамм': 'г', 'грамма': 'г', 'граммов': 'г', 'g': 'г', 'grams': 'г', 'gram': 'г',
     'кг': 'кг', 'kg': 'кг', 'мл': 'мл', 'ml': 'мл', 'л': 'л', 'l': 'л',
-    'шт': 'шт', 'штуки': 'шт', 'штук': 'шт', 'pcs': 'шт',
+    'шт': 'шт', 'штука': 'шт', 'штуки': 'шт', 'штук': 'шт', 'pcs': 'шт',
+    'ст. ложка': 'ст. л.', 'ст. ложки': 'ст. л.', 'ч. ложка': 'ч. л.', 'ч. ложки': 'ч. л.',
+    'щепотка': 'щепотка', 'щепотки': 'щепотка', 'зубчик': 'зубчик', 'зубчика': 'зубчик',
     'cup': 'cup', 'cups': 'cup', 'tbsp': 'ст. л.', 'tsp': 'ч. л.', 'ст. л.': 'ст. л.', 'ч. л.': 'ч. л.',
     'oz': 'oz', 'lb': 'lb', 'lbs': 'lb', 'teaspoon': 'ч. л.', 'tablespoon': 'ст. л.',
 }
@@ -146,13 +156,22 @@ QTY = r'(?:\d+(?:[.,]\d+)?(?:\s+\d+/\d+|/\d+|[½¼¾⅓⅔⅛])?|[½¼¾⅓⅔�
 
 def parse_ingredient(raw):
     raw = clean(raw)
+    original=raw
+    # Prefer an explicit mass over an estimated piece/clove weight.
+    weight=re.search(r'\((\d+(?:[.,]\d+)?)\s*(г|кг|мл|л)\)\s*$',raw,re.I)
+    split=re.split(r'\s+[—–-]\s+|:\s+',raw,maxsplit=1)
+    if weight and len(split)==2:
+        amount=float(weight[1].replace(',','.'))
+        if amount>0:return Ingredient(split[0],amount,weight[2].casefold(),original=original)
+    # Discard only trailing annotations after a quantity, preserving e.g. «фарш (свиной)».
+    if re.search(r'\d\s*(?:г|мл|кг|шт\.?)\s+\([^)]*\)\s*$',raw,re.I):raw=re.sub(r'\s*\([^)]*\)\s*$','',raw)
     # Our paste format is also supported; ordinary website lines need no semicolons.
     if raw.count(';') == 2:
         name, amount, unit = (p.strip() for p in raw.split(';'))
         try:
             value = quantity(amount)
             if value > 0:
-                return Ingredient(name, value, UNIT_ALIASES.get(unit.casefold(), unit), original=raw)
+                return Ingredient(name, value, UNIT_ALIASES.get(unit.casefold(), unit), original=original)
         except (ValueError, ZeroDivisionError):
             pass
     patterns = [rf'^(?P<q>{QTY})\s*(?P<u>{UNITS})\.?\s+(?P<n>.+)$',
@@ -166,10 +185,11 @@ def parse_ingredient(raw):
                 name = raw_name.strip(' —–-:')
                 # A range must not become a single guessed quantity.
                 if not re.search(r'\d\s*[-–—]\s*$', raw_name) and value > 0:
-                    return Ingredient(name, value, UNIT_ALIASES[match['u'].casefold()], original=raw)
+                    return Ingredient(name, value, UNIT_ALIASES[match['u'].casefold()], original=original)
             except (ValueError, ZeroDivisionError):
                 pass
-    return Ingredient(raw or 'Неизвестный продукт', None, '', original=raw)
+    unknown_name=re.split(r'\s+[—–-]\s+|:\s+',original,maxsplit=1)[0]
+    return Ingredient(unknown_name or 'Неизвестный продукт',None,'',original=original)
 
 
 def steps(value):
@@ -220,12 +240,15 @@ def from_schema(data, url):
         raw_ingredients = raw_ingredients.splitlines()
     ingredients = [parse_ingredient(i) for i in raw_ingredients if isinstance(i, str) and i.strip()] if isinstance(raw_ingredients, list) else []
     raw_nutrition = data.get('nutrition') or {}
+    source_per100g=None
     values = dict.fromkeys(('kcal', 'protein', 'fat', 'carbs'))
     if isinstance(raw_nutrition, dict):
         basis = str(raw_nutrition.get('servingSize', '')).strip()
         # A mass-based servingSize is ambiguous relative to recipeYield.
         if basis and not re.fullmatch(r'1\s*(?:serving|portion|порция)', basis, re.I):
-            notes.append(f'КБЖУ сайта относится к «{basis}». Пересчитайте на порцию вручную; значения не перенесены.')
+            if re.fullmatch(r'100\s*(?:g|г|гр\.?)',basis,re.I):
+                source_per100g={key:schema_number(raw_nutrition.get(field),energy=key=='kcal') for key,field in (('kcal','calories'),('protein','proteinContent'),('fat','fatContent'),('carbs','carbohydrateContent'))}
+            notes.append(f'КБЖУ сайта относится к «{basis}». Сохранено отдельно, не как КБЖУ на порцию.')
         else:
             for key, source in (('kcal', 'calories'), ('protein', 'proteinContent'), ('fat', 'fatContent'), ('carbs', 'carbohydrateContent')):
                 values[key] = schema_number(raw_nutrition.get(source), energy=key == 'kcal')
@@ -233,9 +256,18 @@ def from_schema(data, url):
                 notes.append('КБЖУ сайта перенесено как значения на одну порцию (schema.org). Проверьте на странице.')
     if any(i.amount is None for i in ingredients):
         notes.append('У некоторых продуктов не распознаны количества. Они помечены «уточнить».')
+    from site_importers import media_url
+    image=data.get('image') or ''
+    if isinstance(image,list):image=image[0] if image else ''
+    if isinstance(image,dict):image=image.get('url') or image.get('contentUrl') or ''
+    video=data.get('video') or ''
+    if isinstance(video,list):video=video[0] if video else ''
+    if isinstance(video,dict):video=video.get('contentUrl') or video.get('embedUrl') or video.get('url') or ''
+    category=data.get('recipeCategory') or ''
+    if isinstance(category,list):category=', '.join(str(x) for x in category)
     recipe = Recipe(clean(data.get('name', '')) or 'Импортированный рецепт', servings, ingredients=ingredients,
                     method='\n'.join(steps(data.get('recipeInstructions', ''))), source_url=url,
-                    import_notes=notes, reviewed=False, **values)
+                    import_notes=notes,reviewed=False,source_category=clean(category),image_url=media_url(image,url),video_url=media_url(video,url),source_nutrition_per100g=source_per100g,**values)
     validate_recipe(recipe)
     return recipe
 
@@ -258,7 +290,14 @@ def parse_page(html, url):
                 recipes.append(recipe)
                 seen.add(signature)
     if not recipes:
-        raise ImportFailure('На странице не найдена разметка Recipe (JSON-LD). Этот сайт пока не поддерживается. Создайте рецепт вручную и сохраните ссылку на источник.')
+        from site_importers import extract_html_recipes
+        extracted,backend=extract_html_recipes(html,url)
+        for data in extracted:
+            recipe=from_schema(data,url)
+            recipe.import_notes.insert(0,'Импорт: '+backend+'.')
+            recipes.append(recipe)
+    if not recipes:
+        raise ImportFailure('На странице не найден рецепт Recipe (JSON-LD/microdata) или поддерживаемый HTML RussianFood. Возможна блокировка сайта или изменение разметки. Сохраните HTML страницы для проверки.')
     return recipes
 
 
@@ -338,3 +377,15 @@ def import_docx(path):
             notes.append('Не найден раздел «Ингредиенты»/«Продукты»/«Состав». Перенесите продукты из текста кнопкой «Вставить список».')
         recipes.append(Recipe(name, servings, None, ingredients, preparation.strip(), source_url=source, reviewed=False, import_notes=notes))
     return recipes
+
+
+def import_html(path,source_url=None):
+    from pathlib import Path
+    from site_importers import saved_source
+    if Path(path).stat().st_size>MAX_PAGE:raise ImportFailure('HTML-файл слишком большой (более 4 МБ).')
+    raw=Path(path).read_bytes()
+    if len(raw)>MAX_PAGE:raise ImportFailure('HTML-файл слишком большой (более 4 МБ).')
+    markup=decode_html(raw)
+    source=source_url or saved_source(markup)
+    if not source:raise ImportFailure('В HTML не найдена ссылка на источник. Укажите её при импорте.')
+    return parse_page(markup,public_url(source))

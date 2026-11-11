@@ -1,3 +1,4 @@
+from diagnostics import APP_VERSION
 """Real Tk widget workflows; requires Windows or an X11 DISPLAY on Linux."""
 import os
 from pathlib import Path
@@ -212,5 +213,71 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.errors)
         self.assertIn('Журнал диагностики:',self.errors[-1][1])
         content=a.log_path.read_text(encoding='utf-8')
-        for text in ('version=0.6.2','plan_settings','database_sources','Кукурузная каша','operation_failed','Traceback','anchored_search'):
+        for text in (f'version={APP_VERSION}','plan_settings','database_sources','Кукурузная каша','operation_failed','Traceback','anchored_search'):
             self.assertIn(text,content)
+
+    def test_manual_replace_recalculates_persists_and_undoes(self):
+        from menu_editing import replace_dish,swap_dishes,move_dish
+        from core import recipe_key
+        import json
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        before=[[recipe_key(r) for r in day] for day in a.week]
+        replacement=next(r for r in a.recipes if recipe_key(r)!=recipe_key(a.week[0][0]))
+        self.assertTrue(a.apply_menu_change(replace_dish(a.week,(0,0),replacement),'Тест замены',(0,0)))
+        self.assertEqual(a.week[0][0].uid,replacement.uid)
+        saved=json.loads(a.menu_path.read_text())
+        self.assertEqual(saved['uids'][0][0],recipe_key(replacement))
+        self.assertIn(replacement.name,a.report)
+        a.undo_menu_change()
+        self.assertEqual([[recipe_key(r) for r in day] for day in a.week],before)
+        self.assertEqual(str(a.undo_button.cget('state')),'disabled')
+        original=a.week[0][0]
+        self.assertTrue(a.apply_menu_change(swap_dishes(a.week,(0,0),(2,2)),'Обмен',(2,2)))
+        self.assertEqual(a.week[2][2].uid,original.uid)
+        self.assertIn('День 3',a.menu_day.get())
+        a.undo_menu_change()
+        self.assertTrue(a.apply_menu_change(move_dish(a.week,(0,0),(6,2)),'Перенос',(6,2)))
+        self.assertEqual(a.week[6][2].uid,original.uid)
+        self.assertFalse(self.errors)
+
+    def test_imported_source_nutrition_is_preserved_when_card_is_saved(self):
+        from importing import import_html
+        a=self.app
+        path=Path(__file__).parent/'fixtures'/'povar-microdata.html'
+        a.receive_imports(import_html(path))
+        a.fields['name'].set('Мои спагетти')
+        self.assertTrue(a.save_recipe())
+        r=load_recipes(self.path)[0]
+        self.assertEqual(r.source_nutrition_per100g['kcal'],299)
+        self.assertIsNone(r.kcal)
+        self.assertTrue(r.image_url)
+
+    def test_manual_change_write_failure_preserves_menu_and_report(self):
+        from menu_editing import swap_dishes
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        old=a.week;report=a.report
+        with patch('app.save_json',side_effect=OSError('disk full')):
+            self.assertFalse(a.apply_menu_change(swap_dishes(old,(0,0),(0,1)),'Обмен'))
+        self.assertEqual(a.week,old)
+        self.assertEqual(a.report,report)
+        self.assertFalse(a.menu_history)
+
+    def test_replacement_and_move_dialogs_apply_actual_widget_choices(self):
+        from menu_dialogs import ReplaceDialog,MoveDialog
+        from core import recipe_key
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        original=a.week[0][0]
+        dialog=ReplaceDialog(a,(0,0));a.update()
+        candidate=next(r for r in a.recipes if recipe_key(r)!=recipe_key(original))
+        dialog.tree.selection_set(recipe_key(candidate));dialog.show_preview();dialog.apply();a.update()
+        self.assertEqual(a.week[0][0].uid,candidate.uid)
+        dialog=MoveDialog(a,(0,0))
+        dialog.day.set('День 2');dialog.meal.set('Вечер · ужин');dialog.apply();a.update()
+        self.assertEqual(a.week[1][2].uid,candidate.uid)
+        self.assertFalse(self.errors)

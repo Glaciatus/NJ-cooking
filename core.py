@@ -46,6 +46,9 @@ class Recipe:
     tags: list | None = None
     source_category: str = ''
     database_id: str = ''
+    image_url: str = ''
+    video_url: str = ''
+    source_nutrition_per100g: dict | None = None
 
     def to_dict(self):
         return asdict(self)
@@ -69,6 +72,10 @@ def validate_recipe(recipe):
         raise ValueError('Неизвестная принадлежность рецепта.')
     if not isinstance(recipe.uid,str) or not recipe.uid:
         raise ValueError('Рецепт должен иметь идентификатор.')
+    if recipe.source_nutrition_per100g is not None:
+        if not isinstance(recipe.source_nutrition_per100g,dict) or any(k not in KEYS for k in recipe.source_nutrition_per100g):
+            raise ValueError('Неверные исходные данные КБЖУ на 100 г.')
+        recipe.source_nutrition_per100g={k:number(recipe.source_nutrition_per100g.get(k),k) for k in KEYS}
     for key in KEYS:
         setattr(recipe, key, number(getattr(recipe, key), key))
     for i in recipe.ingredients:

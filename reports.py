@@ -38,13 +38,13 @@ def week_issues(week, portions, targets, tolerance, macro_tolerance):
     return issues
 
 
-def week_report(week, people, portions, targets, tolerance, macro_tolerance, require_nutrition=True):
+def week_report(week, people, portions, targets, tolerance, macro_tolerance, require_nutrition=True,extra_warnings=()):
     lines=['МЕНЮ НА НЕДЕЛЮ',f'Человек: {people}; порций на человека за приём пищи: {portions:g}',
            'Цель на человека в сутки: '+nutrition_text(targets),
            f'Допуски: ±{tolerance:g} ккал; БЖУ ±{macro_tolerance*100:g}%.',
            'Контроль КБЖУ: '+('обязательный' if require_nutrition else 'выключен; цели используются только как пожелание'),
            'Разные строки продуктов складываются: граммы + стаканы + ложки; это не варианты замены.\nКБЖУ ниже — на человека, продукты — на всю семью. «≈» — оценка по USDA/справочнику, средним массам и выходу. Неизвестно не означает ноль.\n']
-    issues=week_issues(week,portions,targets,tolerance,macro_tolerance)
+    issues=week_issues(week,portions,targets,tolerance,macro_tolerance)+list(extra_warnings)
     if issues:lines+=['ВНИМАНИЕ: результат после подбора/ручных правок:',*issues,'']
     all_items=[]
     for day_index,day in enumerate(week,1):
@@ -85,5 +85,8 @@ def day_recipe_text(recipe,people,portions):
            f'Готовим {people*portions:g} порций на {people} человек.',info.explanation,
            '\nПРОДУКТЫ НА ВСЮ СЕМЬЮ:',products_text([(recipe,people*portions)]),
            '\nПРИГОТОВЛЕНИЕ:',recipe.method or 'Способ приготовления пока не заполнен.']
+    if recipe.source_nutrition_per100g:lines+=['\nКБЖУ САЙТА НА 100 Г (не на порцию): '+nutrition_text(recipe.source_nutrition_per100g)]
+    if recipe.image_url:lines+=['\nФОТО:',recipe.image_url]
+    if recipe.video_url:lines+=['\nВИДЕО:',recipe.video_url]
     if recipe.source_url:lines+=['\nИСТОЧНИК · фото и видео:',recipe.source_url]
     return '\n'.join(lines)

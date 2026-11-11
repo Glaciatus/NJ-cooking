@@ -6,7 +6,7 @@ from pathlib import Path
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 from tkinter.scrolledtext import ScrolledText
 import webbrowser
 import uuid
@@ -16,8 +16,10 @@ from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredien
 from estimation import servings_info
 from tagging import TAGS, recipe_tags
 from catalog import search_foods
-from importing import import_url, public_url, parse_ingredient, import_docx
+from importing import import_url, public_url, parse_ingredient, import_docx, import_html
 from storage import load_library, save_library, save_json
+from menu_editing import arrangement_warnings
+from menu_dialogs import ReplaceDialog,MoveDialog
 from databases import DatabaseManager
 from reports import week_report, day_recipe_text
 from examples import example_recipes
@@ -169,6 +171,8 @@ class App(tk.Tk):
         self.current = None
         self.ingredients_data = []
         self.loaded_notes = []
+        self.loaded_source_metadata={}
+        self.menu_history=[]
         self.baseline = None
         self.busy = False
         self.selection_lock = False
@@ -259,6 +263,7 @@ class App(tk.Tk):
         ttk.Button(toolbar, text='+ Новый', command=self.new_recipe).pack(side='left')
         ttk.Button(toolbar, text='Из ссылки', command=self.url_dialog).pack(side='left', padx=3)
         ttk.Button(toolbar, text='Word', command=self.import_word).pack(side='left')
+        ttk.Button(toolbar,text='HTML',command=self.import_saved_html).pack(side='left',padx=3)
         self.search = tk.StringVar()
         ttk.Label(left, text='Найти рецепт').pack(anchor='w')
         ttk.Entry(left, textvariable=self.search).pack(fill='x', pady=5)
@@ -466,6 +471,11 @@ class App(tk.Tk):
         self.menu_day.trace_add('write',lambda *_:self.render_day_menu())
         ttk.Button(bar,text='Редактировать рецепт на весь экран',command=self.edit_day_recipe).pack(side='left',padx=6)
         ttk.Button(bar,text='Пересчитать после правок',command=self.recalculate_week).pack(side='left')
+        edits=ttk.Frame(self.menu_tab);edits.pack(fill='x',pady=(0,6))
+        ttk.Button(edits,text='Заменить блюдо…',command=self.replace_menu_dialog).pack(side='left')
+        ttk.Button(edits,text='Перенести / обменять…',command=self.move_menu_dialog).pack(side='left',padx=8)
+        self.undo_button=ttk.Button(edits,text='Отменить изменение',command=self.undo_menu_change,state='disabled')
+        self.undo_button.pack(side='left')
         ttk.Label(self.menu_tab,textvariable=self.week_message,wraplength=1100).pack(anchor='w',pady=5)
         self.day_summary=ttk.Label(self.menu_tab,font=(FONT,11,'bold'),wraplength=1100)
         self.day_summary.pack(anchor='w',pady=5)
@@ -511,6 +521,73 @@ class App(tk.Tk):
             self.status.set('Сначала составьте меню и выберите рецепт дня.');return
         if not self.confirm_switch():return
         self.open_recipe_editor(self.week[self.day_index()][int(self.day_recipes.selection()[0])])
+
+    def selected_menu_slot(self):
+        if not self.week or not self.day_recipes.selection():
+            self.status.set('Выберите блюдо на вкладке «4. Меню».');return None
+        return self.day_index(),int(self.day_recipes.selection()[0])
+
+    def replace_menu_dialog(self):
+        if self.busy or not self.confirm_switch():return
+        slot=self.selected_menu_slot()
+        if slot is not None:ReplaceDialog(self,slot)
+
+    def move_menu_dialog(self):
+        if self.busy or not self.confirm_switch():return
+        slot=self.selected_menu_slot()
+        if slot is not None:MoveDialog(self,slot)
+
+    def menu_change_warnings(self,week):
+        from reports import week_issues
+        c=dict(self.last_plan_settings)
+        names=dict(c.get('required_names',{}))
+        names.update({recipe_key(r):r.name for r in self.recipes})
+        c['required_names']=names
+        c['database_names']={d.uid:d.name for d in self.manager.databases}
+        extra=arrangement_warnings(week,c,{d.uid for d in self.manager.databases if d.enabled})
+        extra+=week_issues(week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])
+        return extra
+
+    def apply_menu_change(self,new_week,action,select=None):
+        if self.busy or not self.week:return False
+        previous=self.week
+        selected=self.selected_menu_slot() or (0,0)
+        try:
+            new_week=refresh_week(new_week,self.recipes)
+            if [[recipe_key(r) for r in d] for d in new_week]==[[recipe_key(r) for r in d] for d in previous]:
+                self.status.set('Расположение блюд не изменилось.');return True
+            self.week=new_week
+            self.render_week()  # Saves before updating widgets; a write failure leaves the old UI intact.
+        except (ValueError,OSError) as exc:
+            self.week=previous
+            self.logger.exception('manual_menu_change_failed action=%s',action)
+            messagebox.showerror('Изменение меню не сохранено',str(exc),parent=self)
+            return False
+        self.menu_history.append((previous,selected));self.menu_history=self.menu_history[-20:]
+        self.undo_button.config(state='normal')
+        target=select or selected
+        self.menu_day.set(f'День {target[0]+1}')
+        self.day_recipes.selection_set(str(target[1]));self.show_day_recipe()
+        self.tabs.select(self.menu_tab)
+        self.status.set(action+': КБЖУ и покупки пересчитаны. При необходимости используйте «Отменить изменение».')
+        changes=[{'day':d+1,'meal':MEALS[m],'before':previous[d][m].name,'after':r.name,'nutrition_after':recipe_nutrition(r)[0],'servings_after':servings_info(r).servings} for d,day in enumerate(new_week) for m,r in enumerate(day) if recipe_key(r)!=recipe_key(previous[d][m])]
+        self.logger.info('manual_menu_change action=%s source=%s target=%s warnings=%s changes=%s',action,selected,target,len(self.menu_change_warnings(new_week)),changes)
+        return True
+
+    def undo_menu_change(self):
+        if self.busy or not self.menu_history or not self.confirm_switch():return
+        old,selected=self.menu_history[-1];current=self.week
+        try:
+            self.week=refresh_week(old,self.recipes)
+            self.render_week()
+        except (ValueError,OSError) as exc:
+            self.week=current;self.logger.exception('menu_undo_failed')
+            messagebox.showerror('Отмена не выполнена',str(exc),parent=self);return
+        self.menu_history.pop()
+        self.undo_button.config(state='normal' if self.menu_history else 'disabled')
+        self.menu_day.set(f'День {selected[0]+1}');self.day_recipes.selection_set(str(selected[1]));self.show_day_recipe()
+        self.status.set('Изменение отменено. КБЖУ и покупки пересчитаны.')
+        self.logger.info('manual_menu_change_undone')
 
     def update_database_choices(self):
         self.database_labels={f'{n}. {d.name}':d.uid for n,d in enumerate(self.manager.databases,1)}
@@ -674,6 +751,7 @@ class App(tk.Tk):
         self.editor_uid=recipe.uid
         self.editor_database_id=recipe.database_id or ('personal' if self.manager.get(self.browse_database).bundled else self.browse_database)
         self.source_category=recipe.source_category
+        self.loaded_source_metadata={key:copy.deepcopy(getattr(recipe,key)) for key in ('image_url','video_url','source_nutrition_per100g')}
         for tag,var in self.recipe_tag_vars.items():var.set(tag in recipe_tags(recipe))
         for key, var in self.fields.items():
             value = getattr(recipe, key)
@@ -682,7 +760,7 @@ class App(tk.Tk):
         self.loaded_notes = list(recipe.import_notes)
         self.method.delete('1.0', 'end')
         self.method.insert('1.0', recipe.method)
-        self.notes.config(text='\n'.join(recipe.import_notes))
+        self.notes.config(text='\n'.join(recipe.import_notes)+(('\nДанные сайта на 100 г: '+nutrition_text(recipe.source_nutrition_per100g)) if recipe.source_nutrition_per100g else ''))
         self.editor_title.config(text='Новый рецепт' if index is None else recipe.name)
         self.editor_message.config(text='')
         self.refresh_ingredients()
@@ -696,7 +774,7 @@ class App(tk.Tk):
                         **{key: number(self.fields[key].get(), label) for key, label in zip(KEYS[1:], NUTRIENT_LABELS[1:])},
                         source_url=self.fields['source_url'].get().strip(), meal=self.fields['meal'].get() or 'Любой', import_notes=self.loaded_notes,
                         uid=self.editor_uid or Recipe('',None,None,[]).uid,source_category=getattr(self,'source_category',''),
-                        tags=[tag for tag,var in self.recipe_tag_vars.items() if var.get()],database_id=self.editor_database_id)
+                        tags=[tag for tag,var in self.recipe_tag_vars.items() if var.get()],database_id=self.editor_database_id,**self.loaded_source_metadata)
         if recipe.source_url:
             public_url(recipe.source_url)
         return recipe
@@ -882,7 +960,7 @@ class App(tk.Tk):
         url = tk.StringVar()
         entry = ttk.Entry(frame, textvariable=url, width=75)
         entry.pack(fill='x', pady=12)
-        ttk.Label(frame, text='Поддерживаются сайты с разметкой Recipe (JSON-LD).\nИсточник сохранится в карточке и меню; фото и видео открываются на сайте.\nПлатные страницы, соцсети и сайты с блокировкой импорта могут не поддерживаться.', wraplength=580).pack(anchor='w')
+        ttk.Label(frame, text='Поддерживаются Recipe JSON-LD, microdata (в том числе Povar.ru) и HTML RussianFood.com.\nИсточник сохранится в карточке и меню; фото и видео открываются на сайте.\nПлатные страницы, соцсети и сайты с блокировкой импорта могут не поддерживаться.', wraplength=580).pack(anchor='w')
         error = ttk.Label(frame, foreground='#a4262c', wraplength=580)
         error.pack(anchor='w', pady=5)
         def start():
@@ -898,6 +976,24 @@ class App(tk.Tk):
         dialog.bind('<Return>', lambda _: start())
         dialog.bind('<Escape>', lambda _: dialog.destroy())
         dialog.grab_set()
+
+    def import_saved_html(self):
+        if self.busy:return
+        path=filedialog.askopenfilename(parent=self,title='Сохранённая страница рецепта',filetypes=[('HTML-страница','*.html *.htm')])
+        if not path:return
+        try:
+            from site_importers import saved_source
+            from importing import decode_html,MAX_PAGE
+            local=Path(path)
+            if local.stat().st_size>MAX_PAGE:raise ValueError('HTML-файл слишком большой (более 4 МБ).')
+            source=saved_source(decode_html(local.read_bytes()))
+            if not source:
+                source=simpledialog.askstring('Источник рецепта','Вставьте исходную ссылку на страницу рецепта:',parent=self)
+                if not source:return
+            self.receive_imports(import_html(path,source))
+        except (ValueError,OSError) as exc:
+            self.logger.exception('saved_html_import_failed')
+            messagebox.showerror('Импорт HTML не выполнен',str(exc),parent=self)
 
     def import_word(self):
         path = filedialog.askopenfilename(parent=self, filetypes=[('Документ Word', '*.docx')])
@@ -988,6 +1084,8 @@ class App(tk.Tk):
                       required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
             return week
         def done(week):
+            self.menu_history=[];self.undo_button.config(state='disabled')
+            context.setdefault('required_names',{recipe_key(r):r.name for r in recipes if recipe_key(r) in context.get('required_ids',[])})
             self.last_plan_settings=context
             self.week=week
             self.render_week()
@@ -998,7 +1096,10 @@ class App(tk.Tk):
 
     def render_week(self):
         c=self.last_plan_settings
-        self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'])
+        save_json(self.menu_path,{'uids':[[recipe_key(r) for r in day] for day in self.week],'context':c})
+        context={**c,'database_names':{d.uid:d.name for d in self.manager.databases},'required_names':{**c.get('required_names',{}),**{recipe_key(r):r.name for r in self.recipes}}}
+        extra=arrangement_warnings(self.week,context,{d.uid for d in self.manager.databases if d.enabled})
+        self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'],extra_warnings=extra)
         from collections import Counter
         dbcounts=Counter(r.database_id for day in self.week for r in day)
         sources='; '.join(f'{self.manager.get(uid).name}: {count}' for uid,count in dbcounts.items())
@@ -1010,10 +1111,9 @@ class App(tk.Tk):
             for m,r in enumerate(day):self.week_tree.insert('','end',iid=f'{d}-{m}',text=f'{d+1}. {r.name}',values=(MEALS[m],))
         for button in (self.export_button,self.recalculate_button,self.replan_button):button.config(state='normal')
         from reports import week_issues
-        issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])
-        self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть неизвестное КБЖУ или отклонения от целей — подробности в отчёте.' if issues else 'Суточные цели КБЖУ соблюдены.'))
+        issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])+extra
+        self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть предупреждения по КБЖУ или условиям меню — подробности в отчёте.' if issues else 'Суточные цели КБЖУ соблюдены.'))
         self.render_day_menu()
-        save_json(self.menu_path,{'uids':[[recipe_key(r) for r in day] for day in self.week],'context':c})
 
     def edit_week_recipe(self):
         selection=self.week_tree.selection()
@@ -1077,7 +1177,7 @@ class App(tk.Tk):
 
     def show_log_location(self):
         if self.log_path:
-            messagebox.showinfo('Журнал диагностики',f'Версия {APP_VERSION}\n\nФайл журнала:\n{self.log_path}\n\nПосле ошибки закройте программу и пришлите этот файл. В нём есть настройки подбора и названия обязательных блюд; полные тексты рецептов и переменные окружения не копируются.',parent=self)
+            messagebox.showinfo('Журнал диагностики',f'Версия {APP_VERSION}\n\nФайл журнала:\n{self.log_path}\n\nПосле ошибки закройте программу и пришлите этот файл. В нём есть настройки подбора и названия выбранных блюд; полные тексты рецептов и переменные окружения не копируются.',parent=self)
         else:messagebox.showwarning('Журнал недоступен','Не удалось создать журнал. Проверьте права на папку данных.',parent=self)
 
     def report_callback_exception(self,exc_type,exc_value,traceback):

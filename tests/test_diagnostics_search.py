@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 import unittest
 from core import Recipe,Ingredient,plan,recipe_key
-from diagnostics import configure_logging,close_logging,log_plan
+from diagnostics import APP_VERSION,configure_logging,close_logging,log_plan
 
 class FirstChoiceRandom(random.Random):
     def choice(self,sequence):return sequence[0]
@@ -55,7 +55,7 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(logger.handlers[0].backupCount,3)
             close_logging(logger)
             content=path.read_text(encoding='utf-8')
-            for expected in ('version=0.6.2','request123','Кукурузная каша','anchored_search','Traceback','Калории, ккал','+03:00'):
+            for expected in (f'version={APP_VERSION}','request123','Кукурузная каша','anchored_search','Traceback','Калории, ккал','+03:00'):
                 self.assertIn(expected,content)
             for absent in ('PRIVATE METHOD SENTINEL','NOT_FOR_LOGS','SECRET SENTINEL'):
                 self.assertNotIn(absent,content)
