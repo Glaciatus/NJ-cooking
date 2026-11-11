@@ -6,7 +6,7 @@ from pathlib import Path
 import platform
 import sys
 
-APP_VERSION='0.7.0'
+APP_VERSION='0.7.1'
 LOGGER_NAME='nj_cooking'
 
 class MoscowFormatter(logging.Formatter):

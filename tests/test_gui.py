@@ -33,6 +33,44 @@ class GuiTests(unittest.TestCase):
         self.directory.cleanup()
         self.assertFalse(self.callback_errors)
 
+    def test_nutrition_preview_requires_acceptance_and_keeps_original_settings(self):
+        a=self.app;a.add_examples()
+        context={**a.read_settings(),'require_nutrition':True,'desired_tags':[],
+                 'required_ids':[],'database_limits':{},'enabled_databases':['personal'],'excluded':[],'wanted':[]}
+        recipes=a.manager.active_recipes()
+        week=[tuple(recipes[:3])]*7
+        a.week=week;a.last_plan_settings=context;a.render_week()
+        before=a.menu_path.read_bytes();report=a.report
+        def synchronous(work,done,*args,**kwargs):done(work())
+        for accept in (False,True):
+            with patch.object(a,'run_background',side_effect=synchronous), patch('app.plan',side_effect=[__import__('core').NutritionSearchFailure('Предел жиров'),week]) as planner, patch.object(a,'confirm_nutrition_preview',return_value=accept) as confirm:
+                a.start_plan(context,recipes)
+            confirm.assert_called_once()
+            self.assertTrue(planner.call_args_list[1].kwargs['allow_nutrition_deviations'])
+            self.assertTrue(planner.call_args_list[1].kwargs['require_nutrition'])
+            if not accept:
+                self.assertEqual(a.menu_path.read_bytes(),before)
+                self.assertEqual(a.report,report)
+            else:
+                self.assertTrue(a.last_plan_settings['accepted_nutrition_deviations'])
+                self.assertTrue(a.last_plan_settings['require_nutrition'])
+                self.assertIn('с отклонениями',a.plan_message.cget('text'))
+
+    def test_preview_dialog_has_explicit_accept_and_cancel_actions(self):
+        a=self.app;a.add_examples()
+        context={**a.read_settings(),'require_nutrition':True,'database_limits':{}}
+        week=[tuple(a.manager.active_recipes()[:3])]*7
+        def click_accept():
+            def find(widget):
+                for child in widget.winfo_children():
+                    if child.winfo_class()=='TButton' and child.cget('text').startswith('Принять меню'):
+                        child.invoke();return True
+                    if find(child):return True
+                return False
+            self.assertTrue(find(a))
+        a.after(80,click_accept)
+        self.assertTrue(a.confirm_nutrition_preview(week,context,'Не удалось найти строгий вариант'))
+
     def test_blank_calories_save_estimate_edit_reload(self):
         a=self.app
         a.fields['name'].set('Каша')
@@ -201,19 +239,15 @@ class GuiTests(unittest.TestCase):
 
     def test_failed_plan_writes_diagnostics_and_displays_log_path(self):
         a=self.app;a.add_examples()
-        a.fields['name'].set('Кукурузная каша')
-        a.fields['kcal'].set('3000')
-        self.assertTrue(a.save_recipe())
-        a.toggle_required(a.current)
-        a.require_nutrition.set(True)
-        a.generate()
-        deadline=time.monotonic()+10
-        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        with patch('app.plan',side_effect=ValueError('Невыполнимая квота базы')):
+            a.generate()
+            deadline=time.monotonic()+10
+            while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
         self.assertFalse(a.busy)
         self.assertTrue(self.errors)
         self.assertIn('Журнал диагностики:',self.errors[-1][1])
         content=a.log_path.read_text(encoding='utf-8')
-        for text in (f'version={APP_VERSION}','plan_settings','database_sources','Кукурузная каша','operation_failed','Traceback','anchored_search'):
+        for text in (f'version={APP_VERSION}','plan_settings','database_sources','operation_failed','Traceback','Невыполнимая квота базы'):
             self.assertIn(text,content)
 
     def test_manual_replace_recalculates_persists_and_undoes(self):

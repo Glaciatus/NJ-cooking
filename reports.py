@@ -32,9 +32,16 @@ def week_issues(week, portions, targets, tolerance, macro_tolerance):
     for n,day in enumerate(week,1):
         values=nutrition_totals([(r,portions) for r in day])
         if any(v is None for v in values.values()):issues.append(f'День {n}: КБЖУ известно частично.')
+        labels={'kcal':('Калории','ккал'),'protein':('Белки','г'),'fat':('Жиры','г'),'carbs':('Углеводы','г')}
         for k in KEYS:
-            if values[k] is not None and abs(values[k]-targets[k])>(tolerance if k=='kcal' else targets[k]*macro_tolerance)+1e-8:
-                issues.append(f'День {n}: {k} вне заданного допуска.')
+            if values[k] is None:continue
+            bound=tolerance if k=='kcal' else targets[k]*macro_tolerance
+            low=max(0,targets[k]-bound);high=targets[k]+bound
+            if values[k]<low-1e-8 or values[k]>high+1e-8:
+                label,unit=labels[k]
+                difference=low-values[k] if values[k]<low else values[k]-high
+                direction='ниже минимума' if values[k]<low else 'выше максимума'
+                issues.append(f'День {n}: {label} — {values[k]:.2f} {unit}; допустимо {low:.2f}–{high:.2f} {unit}; {direction} на {difference:.2f} {unit}.')
     return issues
 
 
@@ -42,7 +49,7 @@ def week_report(week, people, portions, targets, tolerance, macro_tolerance, req
     lines=['МЕНЮ НА НЕДЕЛЮ',f'Человек: {people}; порций на человека за приём пищи: {portions:g}',
            'Цель на человека в сутки: '+nutrition_text(targets),
            f'Допуски: ±{tolerance:g} ккал; БЖУ ±{macro_tolerance*100:g}%.',
-           'Контроль КБЖУ: '+('обязательный' if require_nutrition else 'выключен; цели используются только как пожелание'),
+           'Контроль КБЖУ: '+('заданы строгие пределы; фактические отклонения перечислены ниже' if require_nutrition else 'выключен; цели используются только как пожелание'),
            'Разные строки продуктов складываются: граммы + стаканы + ложки; это не варианты замены.\nКБЖУ ниже — на человека, продукты — на всю семью. «≈» — оценка по USDA/справочнику, средним массам и выходу. Неизвестно не означает ноль.\n']
     issues=week_issues(week,portions,targets,tolerance,macro_tolerance)+list(extra_warnings)
     if issues:lines+=['ВНИМАНИЕ: результат после подбора/ручных правок:',*issues,'']

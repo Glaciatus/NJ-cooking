@@ -11,7 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 import webbrowser
 import uuid
 from diagnostics import APP_VERSION,configure_logging,close_logging,log_plan
-from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, refresh_week, recipe_key
+from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, NutritionSearchFailure, refresh_week, recipe_key
 from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount
 from estimation import servings_info
 from tagging import TAGS, recipe_tags
@@ -21,7 +21,7 @@ from storage import load_library, save_library, save_json
 from menu_editing import arrangement_warnings
 from menu_dialogs import ReplaceDialog,MoveDialog
 from databases import DatabaseManager
-from reports import week_report, day_recipe_text
+from reports import week_report, day_recipe_text, week_issues
 from examples import example_recipes
 
 DATA = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'NJ-cooking' / 'recipes.json'
@@ -1078,21 +1078,58 @@ class App(tk.Tk):
         self.logger.info('request=%s database_sources=%s',request_id,[{'id':d.uid,'name':d.name,'enabled':d.enabled,'quota':d.quota,'recipes':len(d.recipes),'required':len(d.required)} for d in self.manager.databases])
         self.plan_message.config(text='Подбираю неделю…',foreground='#334155')
         def work():
-            week=plan(recipes,context['people'],context['portions'],context['kcal'],context['tolerance'],context['excluded'],context['wanted'],seed=seed,
-                      macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
-                      require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'],
-                      required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
-            return week
+            arguments=dict(people=context['people'],portions=context['portions'],target=context['kcal'],tolerance=context['tolerance'],
+                           excluded=context['excluded'],wanted=context['wanted'],seed=seed,
+                           macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
+                           require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'],
+                           required_ids=context.get('required_ids',[]),database_limits=context.get('database_limits',{}))
+            try:return plan(recipes,**arguments)
+            except NutritionSearchFailure as failure:
+                if not context['require_nutrition']:raise
+                self.logger.info('request=%s searching_preview_with_nutrition_deviations reason=%s',request_id,str(failure))
+                week=plan(recipes,**arguments,allow_nutrition_deviations=True)
+                return {'preview_week':week,'reason':str(failure)}
         def done(week):
+            accepted=False
+            if isinstance(week,dict) and 'preview_week' in week:
+                proposal=week
+                if not self.confirm_nutrition_preview(proposal['preview_week'],context,proposal['reason']):
+                    self.logger.info('request=%s nutrition_preview_rejected',request_id)
+                    self.plan_message.config(text='Вариант с отклонениями не принят. Текущее меню сохранено.',foreground='#9a6700')
+                    return
+                week=proposal['preview_week'];accepted=True
+                context['accepted_nutrition_deviations']=True
+                self.logger.info('request=%s nutrition_preview_accepted issues=%s',request_id,week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance']))
             self.menu_history=[];self.undo_button.config(state='disabled')
             context.setdefault('required_names',{recipe_key(r):r.name for r in recipes if recipe_key(r) in context.get('required_ids',[])})
             self.last_plan_settings=context
             self.week=week
             self.render_week()
             self.tabs.select(self.menu_tab)
-            self.plan_message.config(text='✓ Меню составлено.'+(' Пределы КБЖУ соблюдены.' if context['require_nutrition'] else ' Обязательная проверка КБЖУ выключена.'),foreground='#17623b')
+            self.plan_message.config(text='✓ Меню принято с отклонениями КБЖУ.' if accepted else '✓ Меню составлено.'+(' Пределы КБЖУ соблюдены.' if context['require_nutrition'] else ' Обязательная проверка КБЖУ выключена.'),foreground='#9a6700' if accepted else '#17623b')
             self.status.set('Меню готово. Для правок откройте блюдо в списке, сохраните изменения и пересчитайте выборку.')
         self.run_background(work,done,'Составляю меню на неделю…',request_id=request_id)
+
+    def confirm_nutrition_preview(self,week,context,reason):
+        dialog=tk.Toplevel(self)
+        dialog.title('Вариант меню с отклонениями КБЖУ')
+        dialog.geometry('1000x720');dialog.minsize(780,520)
+        dialog.transient(self);dialog.grab_set()
+        accepted=[False]
+        footer=ttk.Frame(dialog,padding=12);footer.pack(side='bottom',fill='x')
+        def accept():accepted[0]=True;dialog.destroy()
+        ttk.Button(footer,text='Принять меню с этими отклонениями',command=accept).pack(side='left')
+        ttk.Button(footer,text='Отмена — сохранить текущее меню',command=dialog.destroy).pack(side='right')
+        ttk.Label(dialog,text='Найден вариант без строгого соблюдения пределов КБЖУ. Проверьте отклонения на человека в сутки.\nИсключения, выход, полнота КБЖУ, обязательные блюда и квоты баз остаются условиями подбора.',wraplength=940,padding=12).pack(fill='x')
+        text=ScrolledText(dialog,wrap='word',font=(FONT,11));text.pack(fill='both',expand=True,padx=12,pady=8)
+        issues=week_issues(week,context['portions'],{k:context[k] for k in KEYS},context['tolerance'],context['macro_tolerance'])
+        names={d.uid:d.name for d in self.manager.databases}
+        quotas='\n'.join(f'{names.get(db,db)}: задано {quota}, получено {sum(r.database_id==db for day in week for r in day)}' for db,quota in context.get('database_limits',{}).items()) or 'Квоты количества блюд по базам не заданы.'
+        summary='\n'.join(f'День {n}: '+', '.join(r.name for r in day) for n,day in enumerate(week,1))
+        text.insert('1.0','ОТКЛОНЕНИЯ ОТ ГРАНИЦ (не от центра цели)\n'+'\n'.join(issues)+'\n\nКВОТЫ БАЗ\n'+quotas+'\n\nБЛЮДА\n'+summary+'\n\nПРИЧИНА ОСТАНОВКИ СТРОГОГО ПОДБОРА\n'+reason+'\n\nЭто найденный вариант, а не доказанно ближайшее возможное меню.')
+        text.config(state='disabled')
+        self.wait_window(dialog)
+        return accepted[0]
 
     def render_week(self):
         c=self.last_plan_settings

@@ -152,8 +152,12 @@ def contains(recipe, term):
     return any(normalize(term) in normalize(i.name) for i in recipe.ingredients)
 
 
+class NutritionSearchFailure(ValueError):
+    """A search failed after hard recipe/quantity checks passed."""
+
+
 def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=(), wanted=(), seed=None,
-         macro_targets=None, macro_tolerance=.2, require_nutrition=True, desired_tags=None, required_ids=(), database_limits=None):
+         macro_targets=None, macro_tolerance=.2, require_nutrition=True, desired_tags=None, required_ids=(), database_limits=None, allow_nutrition_deviations=False):
     """Three meals/day. All targets per person/day; unknown nutrition is not zero.
 
     Exhaustive day search up to 100k combinations, bounded sample beyond that.
@@ -252,9 +256,9 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         if day in seen:continue
         seen.add(day)
         daily={k:sum(values[n][k] for n in day)*portions if all(values[n][k] is not None for n in day) else None for k in KEYS}
-        error=sum(abs(daily[k]-targets[k])/max(targets[k],1) if daily[k] is not None else .5 for k in KEYS)
+        error=sum((max(0,abs(daily[k]-targets[k])-bounds[k])/max(bounds[k],targets[k]*.01,1) if allow_nutrition_deviations else abs(daily[k]-targets[k])/max(targets[k],1)) if daily[k] is not None else .5 for k in KEYS)
         if error<best_error:closest,best_error=daily,error
-        if not require_nutrition or all(daily[k] is not None and abs(daily[k]-targets[k])<=bounds[k]+1e-8 for k in KEYS):
+        if allow_nutrition_deviations or not require_nutrition or all(daily[k] is not None and abs(daily[k]-targets[k])<=bounds[k]+1e-8 for k in KEYS):
             cover=frozenset().union(*(coverage[n] for n in day))
             dbcounts=Counter(eligible[n].database_id for n in day)
             if all(dbcounts[db]<=quota for db,quota in limits.items()):candidates.append((day,cover,error,dbcounts))
@@ -265,11 +269,11 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         label=keys[token[1]].name if token[0]=='recipe' else token[1]
         budget=2_000_000;complete=True;added=0
         for fixed in anchors:
-            days,finished,checks=anchored_days(fixed,slots,values,eligible,targets,bounds,portions,require_nutrition,limits,max_checks=budget)
+            days,finished,checks=anchored_days(fixed,slots,values,eligible,targets,bounds,portions,require_nutrition and not allow_nutrition_deviations,limits,max_checks=budget)
             budget-=checks;complete=complete and finished
             for day in days:
                 daily={k:sum(values[n][k] for n in day)*portions if all(values[n][k] is not None for n in day) else None for k in KEYS}
-                error=sum(abs(daily[k]-targets[k])/max(targets[k],1) if daily[k] is not None else .5 for k in KEYS)
+                error=sum((max(0,abs(daily[k]-targets[k])-bounds[k])/max(bounds[k],targets[k]*.01,1) if allow_nutrition_deviations else abs(daily[k]-targets[k])/max(targets[k],1)) if daily[k] is not None else .5 for k in KEYS)
                 cover=frozenset().union(*(coverage[n] for n in day))
                 candidates.append((day,cover,error,Counter(eligible[n].database_id for n in day)));added+=1
             if added or budget<=0:break
@@ -278,14 +282,16 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
             diagnostic=anchor_diagnostic(anchors[0],slots,values,eligible,targets,bounds,portions,require_nutrition) if anchors else ''
             outcome='Все дневные сочетания проверены, подходящего нет.' if complete and budget>0 else 'В пределах лимита поиска сочетание не найдено; невозможность не доказана.'
             hint='Для подбора без жёстких пределов снимите «Обязательный контроль КБЖУ» на шаге 2. Либо измените цели, допуски, квоты или добавьте другие блюда.' if require_nutrition else 'Контроль КБЖУ уже выключен. Проверьте квоты и доступные приёмы пищи в базах.'
-            raise ValueError(f'Не удалось включить «{label}». {outcome}\n'+diagnostic+'\n'+hint)
+            raise NutritionSearchFailure(f'Не удалось включить «{label}». {outcome}\n'+diagnostic+'\n'+hint)
     if not candidates:
-        raise ValueError('Подбор не нашёл сочетания в заданных пределах КБЖУ и квот. Ближайший день: '+nutrition_text(closest or dict.fromkeys(KEYS))+'. Добавьте рецепты или расширьте ограничения.')
+        raise NutritionSearchFailure('Подбор не нашёл сочетания в заданных пределах КБЖУ и квот. Ближайший день: '+nutrition_text(closest or dict.fromkeys(KEYS))+'. Добавьте рецепты или расширьте ограничения.')
     for token in tokens:
         if not any(token in c[1] for c in candidates):
             label=keys[token[1]].name if token[0]=='recipe' else token[1]
             raise ValueError('Обязательное пожелание не вписывается в дневные ограничения: '+label)
     pool=candidates if len(candidates)<=2000 else rng.sample(candidates,2000)
+    if allow_nutrition_deviations:
+        pool=sorted(candidates,key=lambda c:c[2])[:1000]+pool[:1000]
     for token in sorted(tokens):
         matching=[c for c in candidates if token in c[1]]
         pool.extend(sorted(matching,key=lambda c:(-len(c[1]),c[2]))[:10])
@@ -311,7 +317,7 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         if len(week)==7 and not uncovered and all(v==0 for v in remaining.values()):
             log.info('plan_success days=7 required_covered=%s',len(required))
             return week
-    raise ValueError('Ограниченный подбор не смог совместить обязательные рецепты, квоты баз и остальные условия за 7 дней. Измените отметки, квоты или допуски.')
+    raise NutritionSearchFailure('Ограниченный подбор не смог совместить обязательные рецепты, квоты баз и остальные условия за 7 дней. Измените отметки, квоты или допуски.')
 
 
 def recipe_key(recipe):
