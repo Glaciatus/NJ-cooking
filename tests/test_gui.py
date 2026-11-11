@@ -103,3 +103,56 @@ class GuiTests(unittest.TestCase):
         a.update()
         self.assertTrue(a.generate_button.winfo_ismapped())
         self.assertLess(a.generate_button.winfo_rooty()+a.generate_button.winfo_height(), a.winfo_rooty()+a.winfo_height())
+
+    def test_edit_current_week_tags_portions_and_recalculate_without_replacing_dishes(self):
+        a=self.app
+        a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        self.assertFalse(a.busy)
+        original_ids=[[r.uid for r in day] for day in a.week]
+        a.week_tree.selection_set('0-0')
+        a.edit_week_recipe()
+        uid=a.editor_uid
+        a.fields['name'].set('Исправленный рецепт недели')
+        a.fields['servings'].set('2')
+        a.fields['kcal'].set('300')
+        a.recipe_tag_vars['Десерт'].set(True)
+        self.assertTrue(a.save_recipe())
+        self.assertEqual(a.recipes[a.current].uid,uid)
+        self.assertIn('изменён',a.week_message.get())
+        self.assertEqual(str(a.export_button.cget('state')),'disabled')
+        a.recalculate_week()
+        self.assertEqual([[r.uid for r in day] for day in a.week],original_ids)
+        revised=next(r for day in a.week for r in day if r.uid==uid)
+        self.assertEqual(revised.kcal,300)
+        self.assertEqual(revised.servings,2)
+        self.assertIn('Десерт',revised.tags)
+        self.assertIn('Исправленный рецепт недели',a.report)
+        self.assertEqual(str(a.export_button.cget('state')),'normal')
+        self.assertTrue(a.menu_path.exists())
+        self.assertFalse(self.errors)
+
+    def test_replan_current_pool_keeps_saved_settings(self):
+        a=self.app;a.add_examples();a.generate()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        pool={r.uid for day in a.week for r in day}
+        context=dict(a.last_plan_settings)
+        a.settings['people'].set('999')
+        a.replan_current()
+        deadline=time.monotonic()+5
+        while a.busy and time.monotonic()<deadline:a.update();time.sleep(.01)
+        self.assertFalse(a.busy)
+        self.assertTrue({r.uid for day in a.week for r in day}<=pool)
+        self.assertEqual(a.last_plan_settings,context)
+        self.assertFalse(self.errors)
+
+    def test_ingredient_preserves_usda_selection_and_can_disable_range_estimate(self):
+        i=Ingredient('Продукт',None,'шт',fdc_id=171287,amount_estimate=2.5,amount_basis='2-3 шт')
+        dialog=IngredientDialog(self.app,i)
+        self.assertEqual(dialog.fdc_id,171287)
+        dialog.keep_estimate.set(False)
+        dialog.save()
+        self.assertEqual(dialog.result.fdc_id,171287)
+        self.assertIsNone(dialog.result.amount_estimate)

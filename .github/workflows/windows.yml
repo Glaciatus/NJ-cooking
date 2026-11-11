@@ -23,7 +23,12 @@ jobs:
       - name: Install packaging tools
         run: python -m pip install -r requirements-build.txt
       - name: Build standalone Windows application
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name NJ-Cooking app.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name NJ-Cooking --add-data "data;data" app.py
+      - name: Verify bundled data in standalone executable
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath .\dist\NJ-Cooking.exe -ArgumentList '--self-test' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Packaged data check failed: $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
           name: NJ-Cooking-Windows

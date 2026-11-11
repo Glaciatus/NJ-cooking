@@ -9,10 +9,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from tkinter.scrolledtext import ScrolledText
 import webbrowser
-from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan
-from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text
+from core import Recipe, Ingredient, MEALS, validate_recipe, readiness, plan, refresh_week
+from nutrition import KEYS, DEFAULT_TARGETS, FOODS, normalize, number, ingredient_nutrition, recipe_nutrition, nutrition_text, reference_food, ingredient_amount
+from estimation import servings_info
+from tagging import TAGS, recipe_tags
+from catalog import search_foods
 from importing import import_url, public_url, parse_ingredient, import_docx
-from storage import load_recipes, save_recipes, save_json
+from storage import load_library, save_library, save_json
 from reports import week_report
 from examples import example_recipes
 
@@ -38,6 +41,10 @@ class IngredientDialog(tk.Toplevel):
         i = ingredient or Ingredient('', None, 'г')
         frame = ttk.Frame(self, padding=15)
         frame.pack(fill='both', expand=True)
+        self.original_ingredient=copy.deepcopy(i)
+        self.fdc_id=i.fdc_id
+        self.reference_name=normalize(i.name)
+        self.keep_estimate=tk.BooleanVar(value=i.amount_estimate is not None)
         self.name = tk.StringVar(value=i.name)
         self.amount = tk.StringVar(value='' if i.amount is None else f'{i.amount:g}')
         self.unit = tk.StringVar(value=i.unit or 'г')
@@ -48,13 +55,16 @@ class IngredientDialog(tk.Toplevel):
         ttk.Label(frame, text='Не знаете количество? Оставьте пустым и сохраните черновик.', wraplength=400).grid(row=6, column=0, sticky='w', padx=5, pady=5)
         self.hint = ttk.Label(frame, text='', wraplength=410)
         self.hint.grid(row=7, column=0, padx=5, pady=5, sticky='w')
-        self.name.trace_add('write', lambda *_: self.reference_hint())
+        self.name.trace_add('write', lambda *_: self.name_changed())
         self.reference_hint()
+        ttk.Button(frame,text='Выбрать продукт из полной базы USDA…',command=self.choose_usda).grid(row=7,column=1,sticky='e',padx=8)
+        if i.amount_estimate is not None:
+            ttk.Checkbutton(frame,text=f'Использовать оценку количества ≈ {i.amount_estimate:g}',variable=self.keep_estimate).grid(row=6,column=1,sticky='w')
         box = ttk.LabelFrame(frame, text='Необязательно: своё КБЖУ на 100 г', padding=8)
         box.grid(row=8, column=0, sticky='ew', pady=5)
         self.values = [tk.StringVar(value='' if i.per100g is None else f'{i.per100g[n]:g}') for n in range(4)]
         for n, (label, var) in enumerate(zip(NUTRIENT_LABELS, self.values)):
-            entry_row(box, label, var, n*2)
+            entry_row(box,label,var,(n//2)*2,n%2,width=18)
         self.mass = tk.StringVar(value='' if i.grams_per_unit is None else f'{i.grams_per_unit:g}')
         entry_row(frame, 'Для шт — грамм/шт; для мл и л — грамм/мл', self.mass, 9)
         self.error = ttk.Label(frame, foreground='#a4262c', wraplength=410)
@@ -67,14 +77,51 @@ class IngredientDialog(tk.Toplevel):
         self.grab_set()
 
     def reference_hint(self):
-        food = FOODS.get(normalize(self.name.get()))
+        food=reference_food(self.name.get(),self.fdc_id)
         text = ('Есть в справочнике: ' + nutrition_text(dict(zip(KEYS, food.values))) + ' на 100 г. Значения приблизительные.' if food else
                 'Нет точного совпадения в справочнике. Можно задать КБЖУ продукта ниже или КБЖУ всего блюда в карточке рецепта.')
+        if food and food.fdc_id:
+            text += f' FDC {food.fdc_id}: {food.description}.'
         if food and food.piece_g:
             text += f' Принято: 1 шт ≈ {food.piece_g:g} г; массу можно изменить ниже.'
         if food and food.density:
             text += f' Принято: 1 мл ≈ {food.density:g} г.'
         self.hint.config(text=text)
+
+    def name_changed(self):
+        if normalize(self.name.get())!=self.reference_name:self.fdc_id=None
+        self.reference_hint()
+
+    def choose_usda(self):
+        dialog=tk.Toplevel(self)
+        dialog.title('Справочник USDA — выбор продукта')
+        dialog.transient(self)
+        dialog.geometry('850x500')
+        query=tk.StringVar(value=self.name.get())
+        ttk.Label(dialog,text='Поиск по русским алиасам, английскому описанию или FDC ID. Выбирайте raw/cooked и жирность внимательно.',wraplength=800,padding=10).pack(anchor='w')
+        ttk.Entry(dialog,textvariable=query).pack(fill='x',padx=10)
+        tree=ttk.Treeview(dialog,columns=('dataset',),show='tree headings',selectmode='browse')
+        tree.heading('#0',text='USDA продукт — КБЖУ на 100 г')
+        tree.heading('dataset',text='Источник')
+        tree.column('#0',width=620)
+        tree.column('dataset',width=120)
+        tree.pack(fill='both',expand=True,padx=10,pady=10)
+        def search():
+            tree.delete(*tree.get_children())
+            for row in search_foods(query.get()):
+                values=dict(zip(KEYS,row['values']))
+                tree.insert('','end',iid=str(row['id']),text=f"{row['id']} · {row['description']} · {nutrition_text(values)}",values=(row['dataset'],))
+        def choose():
+            selected=tree.selection()
+            if selected:
+                self.fdc_id=int(selected[0]);self.reference_name=normalize(self.name.get())
+                self.reference_hint();dialog.destroy();self.grab_set()
+        toolbar=ttk.Frame(dialog);toolbar.pack(fill='x',padx=10,pady=10)
+        ttk.Button(toolbar,text='Найти',command=search).pack(side='left')
+        ttk.Button(toolbar,text='Использовать выбранный',command=choose).pack(side='right')
+        dialog.bind('<Return>',lambda _:search())
+        tree.bind('<Double-1>',lambda _:choose())
+        search();dialog.grab_set()
 
     def save(self):
         try:
@@ -86,20 +133,28 @@ class IngredientDialog(tk.Toplevel):
                 raise ValueError('Заполните все четыре значения на 100 г либо оставьте все пустыми.')
             self.result = Ingredient(name, number(self.amount.get(), 'Количество', allow_zero=False), self.unit.get().strip(),
                                      values if all(v is not None for v in values) else None,
-                                     number(self.mass.get(), 'Масса единицы', allow_zero=False))
+                                     number(self.mass.get(), 'Масса единицы', allow_zero=False),
+                                     original=self.original_ingredient.original,fdc_id=self.fdc_id,
+                                     amount_estimate=self.original_ingredient.amount_estimate if self.keep_estimate.get() else None,
+                                     amount_basis=self.original_ingredient.amount_basis if self.keep_estimate.get() else '')
             self.destroy()
         except ValueError as exc:
             self.error.config(text=str(exc))
 
 
 class App(tk.Tk):
-    def __init__(self, data_path=DATA):
+    def __init__(self, data_path=DATA, include_bundled=None):
         super().__init__()
         self.title('Семейное меню • рецепты, КБЖУ и покупки')
         self.geometry('1240x860')
         self.minsize(1000, 700)
         self.data_path = Path(data_path)
+        self.include_bundled = (self.data_path == DATA) if include_bundled is None else include_bundled
         self.settings_path = self.data_path.with_name('settings.json')
+        self.menu_path = self.data_path.with_name('menu.json')
+        self.last_plan_settings = None
+        self.editor_uid = None
+        self.search_timer = None
         self.recipes = []
         self.current = None
         self.ingredients_data = []
@@ -138,7 +193,7 @@ class App(tk.Tk):
         self.build_settings()
         self.build_result()
         try:
-            self.recipes = load_recipes(self.data_path)
+            self.recipes = load_library(self.data_path,self.include_bundled)
         except ValueError as exc:
             messagebox.showerror('Рецепты не загружены — данные сохранены', str(exc), parent=self)
             self.after_idle(self.destroy)
@@ -146,6 +201,8 @@ class App(tk.Tk):
         self.load_settings()
         self.refresh_library()
         self.load_editor(None)
+        self.load_saved_week()
+        if self.include_bundled:self.status.set(f"База подключена: {len(self.recipes)} рецептов. Подтверждение каждого не требуется. Перейдите к шагу 2.")
         self.poll_id = self.after(80, self.poll_events)
         self.protocol('WM_DELETE_WINDOW', self.close)
 
@@ -164,7 +221,7 @@ class App(tk.Tk):
         self.search = tk.StringVar()
         ttk.Label(left, text='Найти рецепт').pack(anchor='w')
         ttk.Entry(left, textvariable=self.search).pack(fill='x', pady=5)
-        self.search.trace_add('write', lambda *_: self.refresh_library())
+        self.search.trace_add('write', lambda *_: self.schedule_search())
         self.library = ttk.Treeview(left, columns=('state',), show='tree headings', selectmode='browse', height=14)
         self.library.heading('#0', text='Название')
         self.library.heading('state', text='Статус')
@@ -184,7 +241,7 @@ class App(tk.Tk):
         ttk.Button(left, text='Далее: семья и цели →', command=lambda: self.tabs.select(self.settings_tab)).pack(fill='x', pady=10)
         fixed_actions = ttk.Frame(right, padding=(15, 0, 8, 8))
         fixed_actions.pack(fill='x')
-        ttk.Button(fixed_actions, text='Сохранить рецепт / подтвердить импорт', style='Primary.TButton', command=self.save_recipe).pack(side='left')
+        ttk.Button(fixed_actions, text='Сохранить изменения рецепта', style='Primary.TButton', command=self.save_recipe).pack(side='left')
         ttk.Label(fixed_actions, text='Ctrl+S', foreground='#666666').pack(side='left', padx=8)
         self.bind('<Control-s>', lambda _: self.save_recipe() if self.tabs.select() == str(self.library_tab) else None)
         # Scrollable editor keeps the form accessible on smaller Windows screens.
@@ -222,9 +279,15 @@ class App(tk.Tk):
         for n, (key, label) in enumerate(zip(KEYS, NUTRIENT_LABELS)):
             nutrition.columnconfigure(n, weight=1)
             entry_row(nutrition, label, self.fields[key], 0, n, width=12)
-        ttk.Label(nutrition, text='Пустое поле = расчёт по ингредиентам. Введённое число заменяет расчёт. Ноль означает 0, а не отсутствие данных.', wraplength=650).grid(row=2, column=0, columnspan=4, sticky='w', pady=5)
+        ttk.Label(nutrition, text='Пустое поле = расчёт по ингредиентам. Ручное число — НА ОДНУ ПОРЦИЮ; при смене исходного выхода проверьте его. Ноль означает 0.', wraplength=650).grid(row=2, column=0, columnspan=4, sticky='w', pady=5)
         self.nutrition_preview = ttk.Label(nutrition, wraplength=650)
         self.nutrition_preview.grid(row=3, column=0, columnspan=4, sticky='w')
+        tags_box = ttk.LabelFrame(form, text='Принадлежность блюда — можно отметить несколько', padding=8)
+        tags_box.pack(fill='x', pady=5)
+        self.recipe_tag_vars = {tag: tk.BooleanVar(value=False) for tag in TAGS}
+        for n,(tag,var) in enumerate(self.recipe_tag_vars.items()):
+            ttk.Checkbutton(tags_box,text=tag,variable=var,command=self.update_preview).grid(row=n//3,column=n%3,sticky='w',padx=4)
+        ttk.Button(tags_box,text='Определить по названию и составу',command=self.auto_tags).grid(row=5,column=0,columnspan=3,sticky='w',pady=5)
         self.ingredients_tree = ttk.Treeview(form, columns=('amount', 'unit'), show='tree headings', height=6, selectmode='browse')
         for key, text, width in (('#0', 'Продукты во всём исходном рецепте', 310), ('amount', 'Количество', 110), ('unit', 'Ед.', 80)):
             self.ingredients_tree.heading(key, text=text)
@@ -247,7 +310,7 @@ class App(tk.Tk):
         self.notes.pack(anchor='w', pady=5)
         self.editor_message = ttk.Label(form, wraplength=650)
         self.editor_message.pack(anchor='w', pady=5)
-        ttk.Button(form, text='Сохранить рецепт / подтвердить импорт', style='Primary.TButton', command=self.save_recipe).pack(anchor='w', pady=8)
+        ttk.Button(form, text='Сохранить изменения рецепта', style='Primary.TButton', command=self.save_recipe).pack(anchor='w', pady=8)
         for var in self.fields.values():
             var.trace_add('write', lambda *_: self.update_preview())
 
@@ -292,6 +355,15 @@ class App(tk.Tk):
         entry_row(box, 'Допуск Б, Ж и У ± %', self.settings['macro_tolerance'], 2, 1)
         ttk.Button(box, text='Вернуть стартовые значения', command=self.reset_targets).grid(row=3, column=2, columnspan=2, padx=5)
         ttk.Label(box, text='Если поле пустое, используется: 2000 ккал, Б 75 г, Ж 67 г, У 275 г; допуски ±200 ккал и ±20% БЖУ.\nЭто стартовый ориентир для взрослого, а не индивидуальная норма. Для детей и разных потребностей измените цели.', wraplength=1000).grid(row=4, column=0, columnspan=4, sticky='w', padx=5, pady=8)
+        self.require_nutrition=tk.BooleanVar(value=False)
+        ttk.Checkbutton(box,text='Обязательный контроль КБЖУ — исключать неполные данные и соблюдать все пределы',variable=self.require_nutrition).grid(row=5,column=0,columnspan=4,sticky='w',pady=5)
+        ttk.Label(box,text='Без отметки: неизвестное КБЖУ не блокирует подбор, цели — пожелание. Выход блюда должен быть указан или оценён.',wraplength=1000).grid(row=6,column=0,columnspan=4,sticky='w')
+        tag_box=ttk.LabelFrame(content,text='Желаемые блюда — разрешить любой из отмеченных типов',padding=10)
+        tag_box.pack(fill='x',pady=8)
+        self.desired_tag_vars={tag:tk.BooleanVar(value=False) for tag in TAGS}
+        for n,(tag,var) in enumerate(self.desired_tag_vars.items()):
+            ttk.Checkbutton(tag_box,text=tag,variable=var).grid(row=n//4,column=n%4,sticky='w',padx=8)
+        ttk.Label(tag_box,text='Нет отметок — все типы. Отметки ограничивают набор; каждый отмеченный тип не обязательно появится за неделю.',wraplength=1000).grid(row=4,column=0,columnspan=4,sticky='w',pady=5)
         restrictions = ttk.LabelFrame(content, text='Продукты', padding=12)
         restrictions.pack(fill='x', pady=8)
         restrictions.columnconfigure(0, weight=1)
@@ -300,30 +372,64 @@ class App(tk.Tk):
         ttk.Label(restrictions, text='Сопоставление по части названия: «молок» найдёт «молоко». Количество остатков пока не учитывается.', wraplength=1000).grid(row=4, column=0, sticky='w', padx=5, pady=5)
 
     def build_result(self):
-        actions = ttk.Frame(self.result_tab)
-        actions.pack(fill='x', pady=(0, 8))
-        ttk.Button(actions, text='← Изменить цели', command=lambda: self.tabs.select(self.settings_tab)).pack(side='left')
-        self.export_button = ttk.Button(actions, text='Сохранить меню и покупки (.txt)', command=self.export, state='disabled')
-        self.export_button.pack(side='left', padx=8)
-        self.output = ScrolledText(self.result_tab, wrap='word', state='disabled', font=(FONT, 10))
-        self.output.pack(fill='both', expand=True)
-        self.set_output('Здесь появятся меню, КБЖУ на блюдо, день и неделю, ссылки на рецепты и список покупок.\n\nСначала добавьте рецепты на шаге 1, затем нажмите «Составить меню» на шаге 2.')
+        actions=ttk.Frame(self.result_tab)
+        actions.pack(fill='x',pady=(0,6))
+        ttk.Button(actions,text='← Изменить цели',command=lambda:self.tabs.select(self.settings_tab)).pack(side='left')
+        self.export_button=ttk.Button(actions,text='Сохранить меню (.txt)',command=self.export,state='disabled')
+        self.export_button.pack(side='left',padx=6)
+        self.recalculate_button=ttk.Button(actions,text='Пересчитать эти блюда',command=self.recalculate_week,state='disabled')
+        self.recalculate_button.pack(side='left',padx=6)
+        self.replan_button=ttk.Button(actions,text='Подобрать заново из этих блюд',command=self.replan_current,state='disabled')
+        self.replan_button.pack(side='left')
+        self.week_message=tk.StringVar(value='После подбора: двойной щелчок по блюду → правки → сохранить → пересчитать или подобрать заново.')
+        ttk.Label(self.result_tab,textvariable=self.week_message,wraplength=1050).pack(anchor='w',pady=5)
+        ttk.Button(self.result_tab,text='Открыть выбранный рецепт для правки',command=self.edit_week_recipe).pack(anchor='w',pady=(0,5))
+        week_list=ttk.Frame(self.result_tab)
+        week_list.pack(fill='x')
+        self.week_tree=ttk.Treeview(week_list,columns=('meal',),show='tree headings',height=5,selectmode='browse')
+        self.week_tree.heading('#0',text='21 блюдо · день и рецепт (двойной щелчок — изменить)')
+        self.week_tree.heading('meal',text='Приём пищи')
+        self.week_tree.column('#0',width=720)
+        self.week_tree.column('meal',width=140)
+        week_scroll=ttk.Scrollbar(week_list,orient='vertical',command=self.week_tree.yview)
+        self.week_tree.configure(yscrollcommand=week_scroll.set)
+        week_scroll.pack(side='right',fill='y')
+        self.week_tree.pack(side='left',fill='x',expand=True)
+        # Mouse-wheel and keyboard navigation work for all 21 entries.
+        self.week_tree.bind('<Double-1>',lambda _:self.edit_week_recipe())
+        self.output=ScrolledText(self.result_tab,wrap='word',state='disabled',font=(FONT,10))
+        self.output.pack(fill='both',expand=True,pady=(6,0))
+        self.set_output('Встроенные рецепты уже доступны на шаге 1. Настройте семью, теги и контроль КБЖУ на шаге 2 и составьте меню.')
+
+    def schedule_search(self):
+        if self.search_timer is not None:self.after_cancel(self.search_timer)
+        self.search_timer=self.after(200,self.refresh_library)
 
     def refresh_library(self):
-        self.selection_lock = True
+        if self.search_timer is not None:self.after_cancel(self.search_timer)
+        self.search_timer=None
+        self.selection_lock=True
         self.library.delete(*self.library.get_children())
-        term = normalize(self.search.get())
-        for n, recipe in enumerate(self.recipes):
-            if term in normalize(recipe.name):
-                self.library.insert('', 'end', iid=str(n), text=recipe.name, values=('Уточнить' if readiness(recipe) else 'Готов к меню',))
-        if self.current is not None and self.library.exists(str(self.current)):
-            self.library.selection_set(str(self.current))
-        ready = sum(not readiness(r) for r in self.recipes)
-        self.library_count.config(text=f'Всего: {len(self.recipes)} · Готовы к меню: {ready}\n«Уточнить» — откройте рецепт и прочитайте подсказку.')
-        self.selection_lock = False
+        term=normalize(self.search.get())
+        matches=[n for n,r in enumerate(self.recipes) if term in normalize(r.name)]
+        visible=matches[:300]
+        if self.current is not None and self.current in matches and self.current not in visible:visible.append(self.current)
+        for n in visible:
+            r=self.recipes[n]
+            state='Нет выхода' if readiness(r,False) else 'Неполное КБЖУ' if readiness(r) else 'КБЖУ есть'
+            self.library.insert('','end',iid=str(n),text=r.name,values=(state,))
+        if self.current is not None and self.library.exists(str(self.current)):self.library.selection_set(str(self.current))
+        self.library_count.config(text=f'Всего: {len(self.recipes)} · Найдено: {len(matches)} · Показано: {len(visible)}.\nДля поиска остальных введите часть названия. Подтверждение рецептов не требуется.')
+        self.selection_lock=False
+
+    def auto_tags(self):
+        from tagging import infer_tags
+        tags=infer_tags(self.fields['name'].get(),ingredients=self.ingredients_data)
+        for tag,var in self.recipe_tag_vars.items():var.set(tag in tags)
+        self.update_preview()
 
     def snapshot(self):
-        return ([v.get() for v in self.fields.values()], self.method.get('1.0', 'end-1c'), [i.__dict__.copy() for i in self.ingredients_data])
+        return ([v.get() for v in self.fields.values()], self.method.get('1.0', 'end-1c'), [i.__dict__.copy() for i in self.ingredients_data], [tag for tag,var in self.recipe_tag_vars.items() if var.get()])
 
     def dirty(self):
         return self.baseline is not None and self.snapshot() != self.baseline
@@ -339,6 +445,9 @@ class App(tk.Tk):
     def load_editor(self, index):
         self.current = index
         recipe = self.recipes[index] if index is not None else Recipe('', None, None, [])
+        self.editor_uid=recipe.uid
+        self.source_category=recipe.source_category
+        for tag,var in self.recipe_tag_vars.items():var.set(tag in recipe_tags(recipe))
         for key, var in self.fields.items():
             value = getattr(recipe, key)
             var.set('' if value is None else f'{value:g}' if isinstance(value, (int, float)) else value)
@@ -358,7 +467,9 @@ class App(tk.Tk):
                         number(self.fields['kcal'].get(), 'Калории'), copy.deepcopy(self.ingredients_data),
                         self.method.get('1.0', 'end-1c').strip(),
                         **{key: number(self.fields[key].get(), label) for key, label in zip(KEYS[1:], NUTRIENT_LABELS[1:])},
-                        source_url=self.fields['source_url'].get().strip(), meal=self.fields['meal'].get() or 'Любой', import_notes=self.loaded_notes)
+                        source_url=self.fields['source_url'].get().strip(), meal=self.fields['meal'].get() or 'Любой', import_notes=self.loaded_notes,
+                        uid=self.editor_uid or Recipe('',None,None,[]).uid,source_category=getattr(self,'source_category',''),
+                        tags=[tag for tag,var in self.recipe_tag_vars.items() if var.get()])
         if recipe.source_url:
             public_url(recipe.source_url)
         return recipe
@@ -370,10 +481,11 @@ class App(tk.Tk):
             recipe = self.read_editor()
             values, estimated = recipe_nutrition(recipe)
             reasons = readiness(recipe)
+            info=servings_info(recipe)
             unknown = [i.name for i in recipe.ingredients if ingredient_nutrition(i) is None]
             extra = ('\nНе рассчитаны продукты: ' + ', '.join(unknown[:5]) + '. Откройте продукт или введите КБЖУ блюда вручную.' if unknown and any(v is None for v in values.values()) else '')
-            self.nutrition_preview.config(text=('≈ Оценка: ' if estimated else 'На порцию: ') + nutrition_text(values) +
-                                          ('\nДля меню: ' + '; '.join(reasons) + '.' if reasons else '\n✓ После сохранения рецепт готов к меню.') + extra)
+            self.nutrition_preview.config(text=info.explanation + '\n' + ('≈ Оценка: ' if estimated else 'На порцию: ') + nutrition_text(values) +
+                                          ('\nДля строгого контроля КБЖУ: ' + '; '.join(reasons) + '.' if reasons else '\n✓ Рецепт подходит для строгого контроля КБЖУ.') + extra)
         except ValueError as exc:
             self.nutrition_preview.config(text=str(exc))
 
@@ -409,14 +521,17 @@ class App(tk.Tk):
                 updated.append(recipe)
             else:
                 updated[index] = recipe
-            save_recipes(self.data_path, updated)
+            save_library(self.data_path,updated,self.include_bundled)
             self.recipes = updated
             self.load_editor(index)
             self.refresh_library()
             reasons = readiness(recipe)
-            text = ('Черновик сохранён. Для меню: ' + '; '.join(reasons) + '.' if reasons else '✓ Рецепт сохранён и готов к меню. Добавьте другие рецепты или переходите к шагу 2.')
+            text = ('Черновик сохранён. Для меню: '+ '; '.join(readiness(recipe,False))+'.' if readiness(recipe,False) else '✓ Сохранено. Можно использовать без обязательного контроля КБЖУ.' if reasons else '✓ Сохранено. Рецепт подходит для строгого контроля КБЖУ.')
             self.editor_message.config(text=text, foreground='#665000' if reasons else '#17623b')
             self.status.set(text)
+            if self.week and any(r.uid==recipe.uid for day in self.week for r in day):
+                self.week_message.set('Рецепт изменён. Нажмите «Пересчитать эти блюда» для обновления КБЖУ и покупок или повторите подбор из текущей выборки.')
+                self.export_button.config(state='disabled')
             return True
         except (ValueError, OSError) as exc:
             self.editor_message.config(text=str(exc), foreground='#a4262c')
@@ -428,20 +543,24 @@ class App(tk.Tk):
             self.status.set('Сначала выберите рецепт в списке слева.')
             return
         if messagebox.askyesno('Удалить рецепт?', f'Удалить «{self.recipes[self.current].name}»? Предыдущая версия библиотеки останется в .bak.', parent=self):
+            deleted_uid=self.recipes[self.current].uid
             updated = [r for n, r in enumerate(self.recipes) if n != self.current]
             try:
-                save_recipes(self.data_path, updated)
+                save_library(self.data_path,updated,self.include_bundled)
             except OSError as exc:
                 messagebox.showerror('Не удалось сохранить', str(exc), parent=self)
                 return
             self.recipes = updated
+            if self.week and any(r.uid==deleted_uid for day in self.week for r in day):
+                self.week_message.set('Рецепт из текущего меню удалён. Составьте новую неделю из библиотеки.')
+                self.export_button.config(state='disabled')
             self.load_editor(None)
             self.refresh_library()
 
     def refresh_ingredients(self):
         self.ingredients_tree.delete(*self.ingredients_tree.get_children())
         for n, i in enumerate(self.ingredients_data):
-            self.ingredients_tree.insert('', 'end', iid=str(n), text=i.name, values=('уточнить' if i.amount is None else f'{i.amount:g}', i.unit or 'уточнить'))
+            self.ingredients_tree.insert('', 'end', iid=str(n), text=i.name, values=('уточнить' if ingredient_amount(i) is None else ('≈ ' if i.amount is None else '') + f'{ingredient_amount(i):g}', i.unit or 'уточнить'))
         self.update_preview()
 
     def add_ingredient(self):
@@ -506,13 +625,13 @@ class App(tk.Tk):
                 recipe.name = f'{original} ({counter})'
                 counter += 1
             updated.append(recipe)
-        save_recipes(self.data_path, updated)
+        save_library(self.data_path,updated,self.include_bundled)
         first = len(self.recipes)
         self.recipes = updated
         self.load_editor(first)
         self.refresh_library()
         self.tabs.select(self.library_tab)
-        self.status.set(f'Импортировано: {len(recipes)}. Откройте каждый рецепт, проверьте данные и нажмите «Сохранить рецепт / подтвердить импорт».')
+        self.status.set(f'Импортировано: {len(recipes)}. Подтверждение не требуется; данные можно поправить в карточке.')
 
     def url_dialog(self):
         if self.busy:
@@ -577,6 +696,8 @@ class App(tk.Tk):
             data = json.loads(self.settings_path.read_text(encoding='utf-8'))
             if not isinstance(data, dict):
                 raise ValueError('неверный формат')
+            self.require_nutrition.set(bool(data.get('_require_nutrition',False)))
+            for tag,var in self.desired_tag_vars.items():var.set(tag in data.get('_desired_tags',[]))
             for key, value in data.items():
                 if key in self.settings and isinstance(value, (str, int, float)):
                     self.settings[key].set(str(value))
@@ -595,33 +716,99 @@ class App(tk.Tk):
         result['macro_tolerance'] /= 100
         return result
 
+    def settings_payload(self):
+        return {**{k:v.get() for k,v in self.settings.items()},'_require_nutrition':self.require_nutrition.get(),
+                '_desired_tags':[t for t,v in self.desired_tag_vars.items() if v.get()]}
+
     def generate(self):
-        if self.busy:
-            return
-        if not self.confirm_switch():
-            return
+        if self.busy or not self.confirm_switch():return
         try:
-            settings = self.read_settings()
-            save_json(self.settings_path, {k: v.get() for k, v in self.settings.items()})
-        except (ValueError, OSError) as exc:
-            self.plan_message.config(text=str(exc), foreground='#a4262c')
+            context=self.read_settings()
+            context.update(require_nutrition=self.require_nutrition.get(),
+                           desired_tags=[t for t,v in self.desired_tag_vars.items() if v.get()],
+                           excluded=self.settings['excluded'].get().split(','),wanted=self.settings['wanted'].get().split(','))
+            save_json(self.settings_path,self.settings_payload())
+        except (ValueError,OSError) as exc:
+            self.plan_message.config(text=str(exc),foreground='#a4262c')
             return
-        recipes = copy.deepcopy(self.recipes)
-        excluded, wanted = (self.settings[k].get().split(',') for k in ('excluded', 'wanted'))
-        targets = {k: settings[k] for k in KEYS}
-        self.plan_message.config(text='Подбираю сочетания в пределах КБЖУ…', foreground='#334155')
+        self.start_plan(context,self.recipes)
+
+    def start_plan(self, context, recipes):
+        context=copy.deepcopy(context)
+        recipes=copy.deepcopy(recipes)
+        self.plan_message.config(text='Подбираю неделю…',foreground='#334155')
         def work():
-            week = plan(recipes, settings['people'], settings['portions'], settings['kcal'], settings['tolerance'], excluded, wanted,
-                        macro_targets={k: settings[k] for k in KEYS[1:]}, macro_tolerance=settings['macro_tolerance'])
-            return week, week_report(week, settings['people'], settings['portions'], targets, settings['tolerance'], settings['macro_tolerance'])
-        def done(result):
-            self.week, self.report = result
-            self.set_output(self.report)
-            self.export_button.config(state='normal')
-            self.plan_message.config(text='✓ Меню составлено. Каждый день соответствует заданным пределам КБЖУ.', foreground='#17623b')
+            week=plan(recipes,context['people'],context['portions'],context['kcal'],context['tolerance'],context['excluded'],context['wanted'],
+                      macro_targets={k:context[k] for k in KEYS[1:]},macro_tolerance=context['macro_tolerance'],
+                      require_nutrition=context['require_nutrition'],desired_tags=context['desired_tags'])
+            return week
+        def done(week):
+            self.last_plan_settings=context
+            self.week=week
+            self.render_week()
             self.tabs.select(self.result_tab)
-            self.status.set('Меню готово. Ссылки можно открыть нажатием; список покупок находится в конце. Сохраните результат кнопкой над меню.')
-        self.run_background(work, done, 'Составляю меню на неделю…')
+            self.plan_message.config(text='✓ Меню составлено.'+(' Пределы КБЖУ соблюдены.' if context['require_nutrition'] else ' Обязательная проверка КБЖУ выключена.'),foreground='#17623b')
+            self.status.set('Меню готово. Для правок откройте блюдо в списке, сохраните изменения и пересчитайте выборку.')
+        self.run_background(work,done,'Составляю меню на неделю…')
+
+    def render_week(self):
+        c=self.last_plan_settings
+        self.report=week_report(self.week,c['people'],c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'],c['require_nutrition'])
+        self.set_output(self.report)
+        self.week_tree.delete(*self.week_tree.get_children())
+        for d,day in enumerate(self.week):
+            for m,r in enumerate(day):self.week_tree.insert('','end',iid=f'{d}-{m}',text=f'{d+1}. {r.name}',values=(MEALS[m],))
+        for button in (self.export_button,self.recalculate_button,self.replan_button):button.config(state='normal')
+        from reports import week_issues
+        issues=week_issues(self.week,c['portions'],{k:c[k] for k in KEYS},c['tolerance'],c['macro_tolerance'])
+        self.week_message.set('Пересчитано. Блюда сохранены. '+('Есть неизвестное КБЖУ или отклонения от целей — подробности в отчёте.' if issues else 'Суточные цели КБЖУ соблюдены.'))
+        save_json(self.menu_path,{'uids':[[r.uid for r in day] for day in self.week],'context':c})
+
+    def edit_week_recipe(self):
+        selection=self.week_tree.selection()
+        if not selection or not self.week:
+            self.status.set('Выберите блюдо в списке недельного меню.')
+            return
+        if not self.confirm_switch():return
+        d,m=map(int,selection[0].split('-'))
+        uid=self.week[d][m].uid
+        index=next((n for n,r in enumerate(self.recipes) if r.uid==uid),None)
+        if index is None:
+            self.status.set('Этот рецепт удалён. Составьте меню заново.')
+            return
+        self.search.set('')
+        self.load_editor(index)
+        self.refresh_library()
+        self.tabs.select(self.library_tab)
+
+    def recalculate_week(self):
+        if self.busy or not self.week or not self.confirm_switch():return
+        try:
+            self.week=refresh_week(self.week,self.recipes)
+            self.render_week()
+            self.tabs.select(self.result_tab)
+        except (ValueError,OSError) as exc:self.status.set(str(exc))
+
+    def replan_current(self):
+        if self.busy or not self.week or not self.confirm_switch():return
+        try:
+            week=refresh_week(self.week,self.recipes)
+            recipes=list({r.uid:r for day in week for r in day}.values())
+            self.start_plan(self.last_plan_settings,recipes)
+        except ValueError as exc:self.status.set(str(exc))
+
+    def load_saved_week(self):
+        if not self.menu_path.exists():return
+        try:
+            data=json.loads(self.menu_path.read_text(encoding='utf-8'))
+            lookup={r.uid:r for r in self.recipes}
+            if len(data['uids'])!=7 or any(len(day)!=3 for day in data['uids']):raise ValueError('неверная структура недели')
+            self.week=[tuple(lookup[uid] for uid in day) for day in data['uids']]
+            self.last_plan_settings=data['context']
+            self.render_week()
+        except (ValueError,KeyError,TypeError,OSError) as exc:
+            self.week=None
+            self.status.set('Предыдущее меню не восстановлено: '+str(exc))
 
     def run_background(self, work, success, text):
         self.busy = True
@@ -678,6 +865,7 @@ class App(tk.Tk):
                 messagebox.showerror('Не удалось сохранить', str(exc), parent=self)
 
     def destroy(self):
+        if self.search_timer is not None:self.after_cancel(self.search_timer)
         if hasattr(self, 'poll_id'):
             self.after_cancel(self.poll_id)
         super().destroy()
@@ -688,4 +876,10 @@ class App(tk.Tk):
 
 
 if __name__ == '__main__':
-    App().mainloop()
+    import sys
+    if '--self-test' in sys.argv:
+        from storage import bundled_recipes
+        from catalog import records
+        assert len(bundled_recipes())==13703 and len(records())>8000
+    else:
+        App().mainloop()

@@ -3,6 +3,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 from core import Ingredient, Recipe, totals, plan, word_text
+from nutrition import recipe_nutrition
 
 class CoreTests(unittest.TestCase):
     def setUp(self):
@@ -13,7 +14,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(totals([(self.r, 2), (other, 2)]), {('рис', 'г'): 300})
 
     def test_week_calories_and_wishes(self):
-        week = plan([self.r], 3, 1, 1800, 0, wanted=['рис'], seed=1, macro_targets={'protein':21.3, 'fat':2.1, 'carbs':240}, macro_tolerance=0)
+        week = plan([self.r], 3, 1, 1800, 0, wanted=['рис'], seed=1, macro_targets={k:recipe_nutrition(self.r)[0][k]*3 for k in ('protein','fat','carbs')}, macro_tolerance=0)
         self.assertEqual(len(week), 7)
         self.assertTrue(all(sum(r.kcal for r in day) == 1800 for day in week))
         self.assertAlmostEqual(totals([(r, 3) for day in week for r in day])[('рис', 'г')], 6300)

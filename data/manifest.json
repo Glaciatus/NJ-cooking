@@ -1,0 +1,18 @@
+{
+  "recipes": 13703,
+  "usda_records": 8202,
+  "explicit_aliases": 213,
+  "eligible_without_strict_nutrition": 5378,
+  "eligible_with_strict_nutrition": 805,
+  "automatically_estimated_servings": 1729,
+  "usda_archives": [
+    {
+      "name": "FoodData_Central_foundation_food_json_2026-10-29.zip",
+      "sha256": "dd414cc9f1a132626bad354ef6655972c78b44aff14f16114dc899708663c579"
+    },
+    {
+      "name": "FoodData_Central_sr_legacy_food_json_2018-04.zip",
+      "sha256": "0fe8ae486a2c8eb42cb96413f058deb51863a46c8fb8eeb4b1fb45006dd338ef"
+    }
+  ]
+}

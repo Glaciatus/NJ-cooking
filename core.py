@@ -3,9 +3,12 @@ from dataclasses import dataclass, asdict, field
 from collections import defaultdict, Counter
 from itertools import product
 import random
+import uuid
 import zipfile
 import xml.etree.ElementTree as ET
-from nutrition import KEYS, DEFAULT_TARGETS, number, normalize, recipe_nutrition, nutrition_text
+from nutrition import KEYS, DEFAULT_TARGETS, number, normalize, recipe_nutrition, nutrition_text, ingredient_amount
+from estimation import servings_info
+from tagging import TAGS, recipe_tags
 
 MEALS = ('Завтрак', 'Обед', 'Ужин')
 
@@ -17,6 +20,9 @@ class Ingredient:
     per100g: list | None = None
     grams_per_unit: float | None = None
     original: str = ''
+    fdc_id: int | None = None
+    amount_estimate: float | None = None
+    amount_basis: str = ''
 
 @dataclass
 class Recipe:
@@ -32,12 +38,17 @@ class Recipe:
     meal: str = 'Любой'
     import_notes: list = field(default_factory=list)
     reviewed: bool = True
+    uid: str = field(default_factory=lambda: uuid.uuid4().hex)
+    tags: list | None = None
+    source_category: str = ''
 
     def to_dict(self):
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data):
+        data = dict(data)
+        data.setdefault('uid', uuid.uuid5(uuid.NAMESPACE_URL, data.get('source_url') or data.get('name','')).hex)
         result = cls(**{**data, 'ingredients': [Ingredient(**i) for i in data['ingredients']]})
         validate_recipe(result)
         return result
@@ -49,11 +60,18 @@ def validate_recipe(recipe):
     recipe.servings = number(recipe.servings, 'Порции', allow_zero=False)
     if recipe.meal not in ('Любой', *MEALS):
         raise ValueError('Выберите приём пищи из списка.')
+    if recipe.tags is not None and (not isinstance(recipe.tags,list) or any(t not in TAGS for t in recipe.tags)):
+        raise ValueError('Неизвестная принадлежность рецепта.')
+    if not isinstance(recipe.uid,str) or not recipe.uid:
+        raise ValueError('Рецепт должен иметь идентификатор.')
     for key in KEYS:
         setattr(recipe, key, number(getattr(recipe, key), key))
     for i in recipe.ingredients:
         if not i.name.strip():
             raise ValueError('У каждого продукта должно быть название.')
+        i.amount_estimate = number(i.amount_estimate, 'Оценка количества', allow_zero=False)
+        if i.fdc_id is not None:
+            i.fdc_id=number(i.fdc_id,'USDA FDC ID',integer=True,allow_zero=False)
         i.amount = number(i.amount, f'Количество «{i.name}»', allow_zero=False)
         if i.per100g is not None:
             if len(i.per100g) != 4:
@@ -64,22 +82,17 @@ def validate_recipe(recipe):
         i.grams_per_unit = number(i.grams_per_unit, 'Масса единицы', allow_zero=False)
 
 
-def readiness(recipe):
-    reasons = []
-    if not recipe.reviewed:
-        reasons.append('проверьте импорт и сохраните рецепт')
-    if not recipe.servings:
-        reasons.append('укажите исходное число порций')
-    if not recipe.ingredients:
-        reasons.append('добавьте продукты')
-    if any(i.amount is None or not i.unit for i in recipe.ingredients):
-        reasons.append('уточните количество и единицы продуктов')
-    values, _ = recipe_nutrition(recipe)
-    missing = [name for key, name in zip(KEYS, ('калории', 'белки', 'жиры', 'углеводы')) if values[key] is None]
-    if missing:
-        reasons.append('дополните КБЖУ: ' + ', '.join(missing))
-    if values['kcal'] == 0:
-        reasons.append('нулевая калорийность: проверьте состав')
+def readiness(recipe, require_nutrition=True):
+    reasons=[]
+    if not servings_info(recipe).servings:reasons.append('укажите число порций: автоматическая оценка невозможна')
+    if not recipe.ingredients:reasons.append('добавьте продукты')
+    if require_nutrition:
+        if any(ingredient_amount(i) is None or not i.unit for i in recipe.ingredients):
+            reasons.append('уточните количество и единицы продуктов')
+        values,_=recipe_nutrition(recipe)
+        missing=[name for key,name in zip(KEYS,('калории','белки','жиры','углеводы')) if values[key] is None]
+        if missing:reasons.append('дополните КБЖУ: '+', '.join(missing))
+        if values['kcal']==0:reasons.append('нулевая калорийность: проверьте состав')
     return reasons
 
 
@@ -106,19 +119,22 @@ def word_text(path):
     return '\n'.join(''.join(t.text or '' for t in p.findall('.//w:t', ns)) for p in root.findall('.//w:p', ns))
 
 
-def totals(items):
+def totals(items, allow_unknown=False):
     amounts = defaultdict(float)
     conversion = {'кг': ('г', 1000), 'kg': ('г', 1000), 'g': ('г', 1), 'гр': ('г', 1),
                   'л': ('мл', 1000), 'l': ('мл', 1000), 'ml': ('мл', 1)}
     for recipe, portions in items:
-        if not recipe.servings:
+        servings=servings_info(recipe).servings
+        if not servings:
             raise ValueError(f'«{recipe.name}»: укажите число порций для пересчёта.')
         for ingredient in recipe.ingredients:
-            if ingredient.amount is None or not ingredient.unit:
+            amount=ingredient_amount(ingredient)
+            if amount is None or not ingredient.unit:
+                if allow_unknown:continue
                 raise ValueError(f'«{ingredient.name}»: уточните количество и единицу.')
             unit = normalize(ingredient.unit).rstrip('.')
             unit, multiplier = conversion.get(unit, (unit, 1))
-            amounts[(normalize(ingredient.name), unit)] += ingredient.amount * portions / recipe.servings * multiplier
+            amounts[(normalize(ingredient.name), unit)] += amount * portions / servings * multiplier
     return dict(amounts)
 
 
@@ -127,11 +143,11 @@ def contains(recipe, term):
 
 
 def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=(), wanted=(), seed=None,
-         macro_targets=None, macro_tolerance=.2):
+         macro_targets=None, macro_tolerance=.2, require_nutrition=True, desired_tags=None):
     """Three meals/day. All targets per person/day; unknown nutrition is not zero.
 
     Exhaustive day search up to 100k combinations, bounded sample beyond that.
-    Every returned day respects all four nutrient bounds and every wish is covered.
+    In strict mode every day respects all nutrient bounds. Every wish is covered.
     """
     people = number(people, 'Человек', default=2, integer=True, allow_zero=False)
     portions = number(portions, 'Порции', default=1, allow_zero=False)
@@ -146,9 +162,11 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
     bounds = {'kcal': tolerance, **{k: targets[k] * macro_tolerance for k in KEYS[1:]}}
     excluded = [normalize(x) for x in excluded if x.strip()]
     wanted = list(dict.fromkeys(normalize(x) for x in wanted if x.strip()))
-    eligible = [r for r in recipes if not readiness(r) and not any(contains(r, x) for x in excluded)]
+    eligible = [r for r in recipes if not readiness(r,require_nutrition)
+                and (not desired_tags or set(desired_tags).intersection(recipe_tags(r)))
+                and not any(contains(r,x) for x in excluded)]
     if not eligible:
-        raise ValueError('Нет готовых рецептов для меню. На шаге 1 проверьте статусы рецептов, порции, продукты и КБЖУ. Также проверьте исключения.')
+        raise ValueError('Нет готовых рецептов для меню. Проверьте теги, исключения и выход рецептов. Для неполного КБЖУ отключите обязательную проверку на шаге 2.')
     for term in wanted:
         if not any(contains(r, term) for r in eligible):
             raise ValueError(f'Для пожелания «{term}» нет готового рецепта без исключённых продуктов. Добавьте рецепт или измените пожелание.')
@@ -169,11 +187,11 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         if day in seen:
             continue
         seen.add(day)
-        daily = {k: sum(values[n][k] for n in day) * portions for k in KEYS}
-        error = sum(abs(daily[k] - targets[k]) / max(targets[k], 1) for k in KEYS)
+        daily = {k: sum(values[n][k] for n in day) * portions if all(values[n][k] is not None for n in day) else None for k in KEYS}
+        error = sum(abs(daily[k]-targets[k])/max(targets[k],1) if daily[k] is not None else .5 for k in KEYS)
         if error < best_error:
             closest, best_error = daily, error
-        if all(abs(daily[k] - targets[k]) <= bounds[k] + 1e-8 for k in KEYS):
+        if not require_nutrition or all(daily[k] is not None and abs(daily[k]-targets[k]) <= bounds[k]+1e-8 for k in KEYS):
             cover = frozenset(t for t in wanted if any(contains(eligible[n], t) for n in day))
             candidates.append((day, cover, error))
     if not candidates:
@@ -202,3 +220,11 @@ def plan(recipes, people=2, portions=1, target=None, tolerance=None, excluded=()
         if not uncovered:
             return week
     raise ValueError('Не удалось включить все пожелания в семь дней. Сократите список пожеланий или добавьте рецепты с несколькими желаемыми продуктами.')
+
+
+def refresh_week(week, recipes):
+    """Resolve snapshots by stable ID, never by edited name or list position."""
+    lookup={r.uid:r for r in recipes}
+    missing=[r.name for day in week for r in day if r.uid not in lookup]
+    if missing:raise ValueError('Рецепты удалены из библиотеки: '+', '.join(dict.fromkeys(missing)))
+    return [tuple(lookup[r.uid] for r in day) for day in week]

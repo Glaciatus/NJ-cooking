@@ -1,6 +1,7 @@
 import unittest
 from core import Ingredient, Recipe, readiness, validate_recipe, plan
-from nutrition import number, recipe_nutrition, nutrition_totals, DEFAULT_TARGETS
+from nutrition import number, recipe_nutrition, nutrition_totals, DEFAULT_TARGETS, ingredient_mass
+from estimation import servings_info
 from examples import example_recipes
 
 class NutritionTests(unittest.TestCase):
@@ -32,7 +33,8 @@ class NutritionTests(unittest.TestCase):
         self.assertEqual(number('', 'Ккал', default=2000), 2000)
         r = Recipe('Каша', None, None, [Ingredient('Рис', 100, 'г')])
         validate_recipe(r)
-        self.assertIn('укажите исходное число порций', readiness(r))
+        self.assertIsNotNone(servings_info(r).servings)
+        self.assertTrue(servings_info(r).estimated)
 
     def test_invalid_numbers(self):
         for value in ('nan', 'inf', '-2', 'abc'):
@@ -46,7 +48,8 @@ class NutritionTests(unittest.TestCase):
 
     def test_units_do_not_invent_weight(self):
         r = Recipe('Масло', 1, None, [Ingredient('Оливковое масло', 1, 'ст. л.')])
-        self.assertIsNone(recipe_nutrition(r)[0]['kcal'])
+        self.assertGreater(recipe_nutrition(r)[0]['kcal'],0)
+        self.assertAlmostEqual(ingredient_mass(r.ingredients[0]),13.5)
         r.ingredients[0] = Ingredient('Яйцо', 2, 'шт')
         self.assertEqual(recipe_nutrition(r)[0]['kcal'], 143)
         r.ingredients[0] = Ingredient('Продукт', 2, 'шт', [100, 5, 0, 20], 50)
@@ -69,10 +72,10 @@ class NutritionTests(unittest.TestCase):
                     macro_targets={'protein':120, 'fat':90, 'carbs':420}, macro_tolerance=0, seed=2)
         self.assertEqual(nutrition_totals([(r, 2) for r in week[0]])['protein'], 120)
 
-    def test_import_requires_confirmation(self):
+    def test_import_does_not_require_confirmation(self):
         r = example_recipes()[0]
         r.reviewed = False
-        self.assertIn('проверьте импорт и сохраните рецепт', readiness(r))
+        self.assertFalse(readiness(r))
 
     def test_macro_constraint_does_not_silently_relax(self):
         r = Recipe('Рис', 1, 666, [Ingredient('Рис', 100, 'г')], protein=1, fat=1, carbs=150)
